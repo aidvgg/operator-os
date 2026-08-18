@@ -1,0 +1,61 @@
+{
+  "worktree": {
+    "bgIsolation": "none"
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)"
+    ]
+  },
+  "sandbox": {
+    "filesystem": {
+      "allowRead": [
+        "./.env",
+        "./.env.local"
+      ]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/repo-doctor\" 2>&1 || true  # findings reach context only on exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/horizon\" --brief 2>&1 || true  # findings reach context only on exit 0"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|NotebookEdit|Grep|Glob|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deny-env-access.py\"",
+            "timeout": 10,
+            "statusMessage": "env-file guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deny-destructive-git.py\"",
+            "timeout": 10,
+            "statusMessage": "destructive-git guard"
+          }
+        ]
+      }
+    ]
+  }
+}

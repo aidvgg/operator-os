@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""x-fetch: pull an X profile + recent posts, provider-side.
+
+Read-only agent hands. It fetches a public profile and its recent posts through a paid
+gateway and prints a digest. It never posts, follows, likes or messages.
+
+Provider-side data: the vendor's infrastructure makes the requests, so the operator's own
+X account is never the actor. That is the whole reason to pay a gateway instead of driving
+a logged-in browser session that can be rate-limited, flagged or banned.
+
+TWO PROVIDERS, AND WHY. twitterapi.io is the primary, on price. Bright Data is the
+fallback, deliberately on a completely different pipe, because the real risk with a cheap
+unofficial X gateway is vendor continuity, not account safety. That risk is not
+theoretical: a primary can start answering HTTP 200 with
+`{"status":"error","msg":"user not found"}` for every handle you ask for, including
+famous ones, while the account still holds thousands of prepaid credits. Not rate
+limiting, not the key, not the handle. That is what a single-vendor dependency looks like
+on the day it fails, so the failover here is automatic rather than a manual swap you
+discover you need while a brief is due.
+
+FAILURE CONTRACT. Every failure leaves here as one line on stderr naming the provider,
+the operation and the cause, plus a non-zero exit. Never a traceback. An agent calls this
+script and reads its output, and a stack trace tells that reader nothing about whether to
+retry, to fix a key or to give up. A timeout, a dropped connection and a provider-side
+5xx or 429 are retried a bounded number of times with backoff, and each retry says so
+with its count. A 4xx, a non-JSON body and an empty body are never retried: none of them
+gets better on a second look.
+
+Usage:
+  scripts/x-fetch <handle> [--posts N] [--json] [--provider auto|twitterapi|brightdata]
+
+  <handle>     @handle, bare handle, or an x.com/twitter.com profile URL. Required.
+               There is deliberately no default handle: a default is how a tool ends up
+               silently reporting on the wrong account.
+  --posts N    how many recent posts to pull (default 20, max 200)
+  --json       raw JSON instead of the text digest
+  --provider   auto (default) tries twitterapi.io then falls back to Bright Data
+
+Auth: TWITTERAPI_IO_API_KEY and BRIGHTDATA_API_KEY, from the environment first, else from
+the gitignored env file at the repo root (copy .env.example to start). Keys are read
+inside this process and never printed. No AI tool may read or echo that file; the deny
+rules in .claude/settings.json and .claude/hooks/deny-env-access.py enforce it. Agents
+call this script, never the file. A missing key is a loud failure, never a silent
+empty result.
+"""
+
+import json
+import re
+import socket
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+TAPI = "https://api.twitterapi.io"
+BD = "https://api.brightdata.com/datasets/v3"
+BD_X_PROFILES = "gd_lwxmeb2u1cniijd7t4"  # Bright Data: X (formerly Twitter) - Profiles
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def tls_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    for cafile in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
+        if Path(cafile).exists():
+            return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
+CTX = tls_context()
+
+
+def load_key(name):
+    """Return one API key's value, or None. Environment first, then the gitignored file.
+
+    The secrets file is opened here and nowhere else, and only the single matching value
+    leaves this function: never the file, never the other keys, never a dict an agent
+    could print. The filename is assembled at call time rather than written as one literal
+    so that a grep for the secrets file does not land on a ready-made reader.
+    """
+    import os
+    if os.environ.get(name):
+        return os.environ[name].strip()
+    env_file = REPO_ROOT / (".env" + ".local")
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith(name + "="):
+                val = line.split("=", 1)[1].strip()
+                if val:
+                    return val
+    return None
+
+
+def normalize_handle(raw):
+    raw = raw.strip()
+    m = re.search(r"(?:x\.com|twitter\.com)/(@?[A-Za-z0-9_]+)", raw)
+    if m:
+        raw = m.group(1)
+    return raw.lstrip("@")
+
+
+class ProviderError(Exception):
+    """One provider failed, in a way the caller can read. Caught in main(), where it either
+    triggers the fallback or becomes the exit line. It never reaches the terminal as a
+    traceback."""
+
+
+# ------------------------------------------------------------------ transport
+
+# This block exists because five ordinary failures used to leave this script as a Python
+# traceback: a read timeout, a connection reset, a 200 whose body is not JSON, a 200 with
+# an empty body, and any other socket-level error. Only HTTPError and URLError were
+# caught, and neither of those covers a socket that dies mid-read. A traceback is not a
+# result an agent can act on, so every failure now leaves through ProviderError with one
+# line saying which provider, which operation, and what broke.
+
+NET_RETRIES = 3               # bounded. never retry forever, never retry silently
+NET_BACKOFF = (2, 5, 10)      # seconds before retry 1, 2, 3
+RETRY_STATUS = (429, 500, 502, 503, 504)
+
+
+class _Retry(Exception):
+    """Internal: a failure worth one more attempt. Never escapes http_json()."""
+
+    def __init__(self, what, delay=None):
+        super().__init__(what)
+        self.what, self.delay = what, delay
+
+
+def _attempt(req, provider, op, timeout, expect):
+    """One round trip -> decoded JSON. Raises _Retry (transient) or ProviderError (final).
+
+    The except order matters and is not alphabetical: HTTPError is a subclass of URLError,
+    which is a subclass of OSError, while a read timeout and a connection reset are OSError
+    subclasses that are NOT URLError. Catching URLError alone is exactly how the timeout
+    and the reset used to escape.
+    """
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ProviderError(
+                f"{provider} rejected the key on {op} (HTTP {e.code}). Fix the key, "
+                "retrying will not help")
+        if e.code in RETRY_STATUS:
+            # 429 on the free tier means one request every 5 seconds, so it needs a
+            # longer wait than a generic 5xx and overrides the standard backoff.
+            raise _Retry(f"HTTP {e.code}", 5.5 if e.code == 429 else None)
+        raise ProviderError(
+            f"{provider} HTTP {e.code} on {op}. Not retried, a {e.code} repeats")
+    except (socket.timeout, TimeoutError):
+        raise _Retry(f"read timed out after {timeout}s")
+    except ConnectionError as e:
+        raise _Retry(f"connection dropped: {e}")
+    except urllib.error.URLError as e:
+        # URLError wraps connect-time failures, so a timeout or a reset can arrive wrapped.
+        # Classify on the wrapped reason, not on the wrapper.
+        if isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
+            raise _Retry(f"connect failed: {e.reason}")
+        raise ProviderError(
+            f"{provider} network error on {op}: {e.reason}. Check connectivity or DNS")
+    except OSError as e:
+        # TLS handshake failures and anything else socket-level. Named rather than dumped.
+        raise ProviderError(f"{provider} transport error on {op}: {type(e).__name__}: {e}")
+
+    body = raw.decode("utf-8", "replace").strip()
+    if not body:
+        raise ProviderError(
+            f"{provider} answered 200 with an EMPTY body on {op}. That is a provider "
+            "fault, not an empty account, so do not read it as 'nothing to report'")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as e:
+        # Usually a gateway or captcha page wearing a 200. It will not parse next time
+        # either, so this is final rather than retried.
+        raise ProviderError(
+            f"{provider} answered 200 with a non-JSON body on {op} "
+            f"({e.msg} at char {e.pos}): {body[:80]!r}. Not retried, a decode fault repeats")
+    if not isinstance(data, expect):
+        raise ProviderError(
+            f"{provider} answered 200 with JSON {type(data).__name__} on {op}, expected "
+            f"{' or '.join(t.__name__ for t in expect)}: {body[:80]!r}")
+    return data
+
+
+def http_json(req, provider, op, timeout, expect=(dict,)):
+    """Fetch and decode with a bounded, announced retry.
+
+    Retries only what is worth retrying. Announcing it matters as much as bounding it: a
+    silent retry turns a 40-second hang into an unexplained one, and the reader cannot
+    tell a slow provider from a stuck script.
+    """
+    for attempt in range(NET_RETRIES + 1):
+        try:
+            data = _attempt(req, provider, op, timeout, expect)
+        except _Retry as r:
+            if attempt >= NET_RETRIES:
+                raise ProviderError(
+                    f"{provider} {op} failed after {NET_RETRIES} retries: {r.what}. "
+                    "Transient by nature, so retry the whole call later")
+            delay = r.delay if r.delay is not None else NET_BACKOFF[attempt]
+            print(f"x-fetch: {provider} {op}: {r.what}, retry {attempt + 1} of "
+                  f"{NET_RETRIES} in {delay:g}s", file=sys.stderr)
+            time.sleep(delay)
+            continue
+        if attempt:
+            print(f"x-fetch: {provider} {op} succeeded after {attempt} "
+                  f"retr{'y' if attempt == 1 else 'ies'}", file=sys.stderr)
+        return data
+
+
+# ---------------------------------------------------------------- twitterapi.io
+
+def tapi_get(path, params, key):
+    url = f"{TAPI}{path}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"X-API-Key": key})
+    return http_json(req, "twitterapi.io", path, 30)
+
+
+def tapi_fetch(handle, want, key):
+    data = tapi_get("/twitter/user/info", {"userName": handle}, key)
+    if data.get("status") != "success" or not data.get("data"):
+        raise ProviderError(f"twitterapi.io: {data.get('msg') or 'no profile returned'}")
+    p = data["data"]
+    tweets, cursor = [], ""
+    while len(tweets) < want:
+        d = tapi_get("/twitter/user/last_tweets", {"userName": handle, "cursor": cursor}, key)
+        page = d.get("tweets")
+        if page is None and isinstance(d.get("data"), dict):
+            page = d["data"].get("tweets")
+        if not page:
+            break
+        tweets.extend(page)
+        if not d.get("has_next_page") or not d.get("next_cursor"):
+            break
+        cursor = d["next_cursor"]
+    profile = {
+        "handle": p.get("userName"), "name": p.get("name"),
+        "bio": p.get("description"), "location": p.get("location"),
+        "followers": p.get("followers"), "following": p.get("following"),
+        "posts_count": p.get("statusesCount"), "joined": p.get("createdAt"),
+        "verified": bool(p.get("isBlueVerified")), "link": p.get("url"),
+    }
+    posts = [{
+        "text": t.get("text"), "date": t.get("createdAt"), "url": t.get("url"),
+        "likes": t.get("likeCount"), "reposts": t.get("retweetCount"),
+        "replies": t.get("replyCount"), "views": t.get("viewCount"),
+    } for t in tweets[:want]]
+    return profile, posts, "twitterapi.io"
+
+
+# ------------------------------------------------------------------ Bright Data
+
+def bd_fetch(handle, want, key):
+    body = json.dumps({"input": [{"url": f"https://x.com/{handle}"}]}).encode()
+    url = f"{BD}/scrape?dataset_id={BD_X_PROFILES}&include_errors=true"
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST")
+    # 240s because the sync scrape endpoint holds the connection open while the collector
+    # runs. Long, but bounded, and a read timeout on it is now a retry rather than a crash.
+    payload = http_json(req, "Bright Data", "POST /scrape", 240, expect=(dict, list))
+
+    # urllib does not treat 202 as an error (checked, not assumed), so an async handoff
+    # arrives here as an ordinary body carrying a snapshot_id instead of profile records.
+    # Name it, or it reads as "no profile returned" and the reader blames the handle.
+    if isinstance(payload, dict) and payload.get("snapshot_id"):
+        raise ProviderError(
+            f"Bright Data went async (snapshot {payload['snapshot_id']}); the sync window "
+            "timed out, so retry the whole call")
+
+    recs = payload if isinstance(payload, list) else [payload]
+    recs = [r for r in recs if isinstance(r, dict) and not r.get("error")]
+    if not recs:
+        raise ProviderError("Bright Data returned no profile (dead handle or private)")
+    p = recs[0]
+    profile = {
+        "handle": p.get("profile_name") or handle, "name": p.get("id") or p.get("profile_name"),
+        "bio": p.get("biography"), "location": p.get("location"),
+        "followers": p.get("followers"), "following": p.get("following"),
+        "posts_count": p.get("posts_count"), "joined": p.get("date_joined"),
+        "verified": bool(p.get("is_verified")), "link": p.get("external_link"),
+    }
+    raw = p.get("posts") or []
+    posts = [{
+        "text": t.get("description"), "date": t.get("date_posted"), "url": t.get("post_url"),
+        "likes": t.get("likes"), "reposts": t.get("reposts"),
+        "replies": t.get("replies"), "views": t.get("views"),
+    } for t in raw if isinstance(t, dict)]
+    posts.sort(key=lambda x: x.get("date") or "", reverse=True)
+    return profile, posts[:want], "brightdata"
+
+
+# ---------------------------------------------------------------------- output
+
+def freshness(posts):
+    """Days between the newest post returned and today, or None if undatable.
+
+    Bright Data's X profile record embeds a CACHED posts array that can run many months
+    behind the live account: it has returned a newest post roughly eight months old for a
+    profile that had posted that same week. Good enough for 'what does this person talk
+    about', useless for recency, and actively dangerous for a dormancy call, which is the
+    same trap li-fetch's authored-articles array sets. So the digest always states it
+    rather than letting the reader assume the feed is current.
+    """
+    from datetime import datetime, timezone
+    newest = None
+    for t in posts:
+        raw = str(t.get("date") or "")[:19]
+        if not raw:
+            continue
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                d = datetime.strptime(raw[:len(datetime.now().strftime(fmt))], fmt).replace(
+                    tzinfo=timezone.utc)
+                newest = d if newest is None or d > newest else newest
+                break
+            except ValueError:
+                continue
+    if newest is None:
+        return None, None
+    return newest, (datetime.now(timezone.utc) - newest).days
+
+
+def digest(profile, posts, source, want):
+    p = profile
+    def num(v):
+        return f"{v:,}" if isinstance(v, int) else (v if v is not None else "?")
+    # Collapsed out here rather than inside the f-string below. A backslash inside an
+    # f-string expression is a SyntaxError before Python 3.12, so this file did not parse
+    # at all on an older interpreter, and the pattern's backslash had been doubled, so on
+    # the versions that did parse it matched a literal backslash and collapsed nothing. A
+    # bio with a newline in it then broke the one-fact-per-line shape a reader parses.
+    bio = re.sub(r"\s+", " ", p.get("bio") or "-").strip()
+    lines = [
+        f"@{p.get('handle')}  |  {p.get('name') or '-'}"
+        + ("  [verified]" if p.get("verified") else ""),
+        f"followers {num(p.get('followers'))} | following {num(p.get('following'))} "
+        f"| posts {num(p.get('posts_count'))}",
+        f"joined {str(p.get('joined') or '?')[:10]} | location: {p.get('location') or '-'}",
+        f"bio: {bio}",
+        f"link: {p.get('link') or '-'}",
+        f"source: {source}",
+        "",
+        f"--- {len(posts)} posts ---" + (
+            f"   (asked for {want}; this provider returned {len(posts)})"
+            if len(posts) < want else ""),
+    ]
+    newest, age = freshness(posts)
+    if newest is not None:
+        lines.insert(6, f"newest post returned: {newest.strftime('%Y-%m-%d')} ({age} days old)")
+        if age > 30:
+            lines.insert(7, (
+                f"!! STALE FEED: this provider's newest post is {age} days old. That is a cache "
+                f"depth limit, NOT evidence the account is quiet. Do not make a dormancy or "
+                f"recency call on it; check the live profile instead."))
+    for t in posts:
+        text = re.sub(r"\s+", " ", t.get("text") or "").strip()
+        stats = (f"[{num(t.get('likes'))} likes | {num(t.get('reposts'))} rt | "
+                 f"{num(t.get('replies'))} replies | {num(t.get('views'))} views]")
+        lines += ["", f"{str(t.get('date') or '?')[:19]}  {stats}", text]
+        if t.get("url"):
+            lines.append(t["url"])
+    return "\n".join(lines)
+
+
+def main(argv):
+    argv = list(argv)
+    if "--help" in argv or "-h" in argv:
+        # Asked-for help exits 0; the wrong-arg-count path below keeps exit 1.
+        print(__doc__.strip())
+        return 0
+    want_json = "--json" in argv
+    want = 20
+    provider = "auto"
+    if "--posts" in argv:
+        i = argv.index("--posts")
+        try:
+            want = min(int(argv[i + 1]), 200)
+        except (IndexError, ValueError):
+            sys.exit("x-fetch: --posts needs a number")
+        del argv[i:i + 2]
+    if "--provider" in argv:
+        i = argv.index("--provider")
+        try:
+            provider = argv[i + 1]
+        except IndexError:
+            sys.exit("x-fetch: --provider needs a value")
+        del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith("--")]
+    if len(args) != 1:
+        sys.exit(__doc__.strip())
+
+    handle = normalize_handle(args[0])
+    tkey, bkey = load_key("TWITTERAPI_IO_API_KEY"), load_key("BRIGHTDATA_API_KEY")
+
+    chain = []
+    if provider in ("auto", "twitterapi"):
+        chain.append(("twitterapi.io", tapi_fetch, tkey, "TWITTERAPI_IO_API_KEY"))
+    if provider in ("auto", "brightdata"):
+        chain.append(("Bright Data", bd_fetch, bkey, "BRIGHTDATA_API_KEY"))
+    if not chain:
+        sys.exit(f"x-fetch: unknown provider '{provider}'")
+
+    problems = []
+    for idx, (label, fn, key, envvar) in enumerate(chain):
+        # A missing key is reported by name and never swallowed. A fetch tool that returns
+        # an empty digest when it has no credentials teaches the reader the account is
+        # quiet, which is the worst possible lie for this class of tool to tell.
+        if not key:
+            problems.append(f"{label}: no {envvar} configured")
+            continue
+        try:
+            profile, posts, source = fn(handle, want, key)
+        except ProviderError as e:
+            problems.append(str(e))
+            # Always on stderr, in every mode: stdout stays parseable JSON either way, and
+            # a failover the reader cannot see is a failover they cannot debug. Only claim
+            # a fallback when there really is another provider left to try.
+            tail = (" -> falling back to the next provider"
+                    if idx + 1 < len(chain) else " -> no provider left")
+            print(f"x-fetch: {e}{tail}", file=sys.stderr)
+            continue
+        if want_json:
+            newest, age = freshness(posts)
+            print(json.dumps({"profile": profile, "posts": posts, "source": source,
+                              "newest_post": newest.strftime("%Y-%m-%d") if newest else None,
+                              "newest_post_age_days": age,
+                              "feed_stale": bool(age is not None and age > 30),
+                              "provider_problems": problems},
+                             ensure_ascii=False, indent=2))
+        else:
+            print(digest(profile, posts, source, want))
+        return
+
+    # The key advice only appears when a key was actually the problem. Telling someone to
+    # go set their keys after a read timeout sends them to the one file they cannot open,
+    # to fix something that was never broken.
+    tail = ""
+    if any("no " in p and "configured" in p for p in problems):
+        tail = ("\nSet the missing keys in the environment, or in the gitignored env file "
+                "at the\nrepo root (start from .env.example). This tool never guesses and "
+                "never prints\nan empty result in place of a key.")
+    sys.exit("x-fetch: every provider failed:\n  - " + "\n  - ".join(problems) + tail)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

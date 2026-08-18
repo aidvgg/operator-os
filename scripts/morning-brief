@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""morning-brief - the workday brief, assembled without the operator present.
+
+WHAT THIS IS AND IS NOT. This is `/standup`-shaped: read and surface, never write. The
+daily-log skill's hard rule 3 gives it five sanctioned write paths in `knowledge/` and
+this script has none of them, so it writes only to its own gitignored output. Hard rule 2
+bars an acting agent from seeding tasks the operator never stated, so this brief SURFACES
+context and never proposes a task list. Opening the day stays `/plan`, with Sam in the room.
+
+It runs from launchd on workdays, so the day's state is already assembled when Sam sits
+down instead of being gathered live while they wait.
+
+Sections, each from its owner:
+  horizon      scripts/horizon, the commitments clock (overdue + next 14 days)
+  logbook      knowledge/ops/logbook/LOGBOOK.md, the LAST LOGGED cursor, and whether
+               yesterday is still OPEN
+  working tree git status over outputs/ and knowledge/, the reconcile step that
+               /plan and /eod both run first (ai/ERRORS.md: a close spoke two wrong
+               numbers because uncommitted cross-lane work was never read)
+
+Adding a section is the point. Every section is one owner rendered verbatim, so a new one
+is a command and a title. If it talks to the network, register it in NETWORK_SECTIONS below
+so --no-network keeps this useful on a plane or when a provider is down.
+
+Usage:
+  scripts/morning-brief [--no-network] [--quiet] [--stdout]
+  scripts/morning-brief --help
+
+  --no-network  skip every section registered in NETWORK_SECTIONS (fast, local only)
+  --quiet       write the file and notify, print nothing
+  --stdout      print only, write no file
+  --help        print this text and exit
+
+Output: outputs/ops/briefs/<YYYY-MM-DD>.md. Gitignored on purpose: outputs/ops/ is
+local-only, and a brief quotes whatever its sections surface.
+
+================================================================================
+INSTALL (launchd, weekdays 09:07 local). READ STEP 2 BEFORE YOU BLAME THE SCRIPT.
+================================================================================
+
+1. Register the agent. PY must be an interpreter that has whatever your NETWORK_SECTIONS
+   need; the sections that ship need only the standard library, git and scripts/horizon.
+
+     R=$(git rev-parse --show-toplevel)
+     PY=$(python3 -c 'import sys; print(sys.executable)')
+     chmod +x "$R/scripts/morning-brief"
+     mkdir -p "$R/outputs/ops/briefs"
+     sed -e "s|__REPO__|$R|g" -e "s|__PYTHON__|$PY|g" -e "s|__HOME__|$HOME|g" \
+       "$R/scripts/com.northwindlabs.morning-brief.plist" \
+       > ~/Library/LaunchAgents/com.northwindlabs.morning-brief.plist
+     launchctl bootstrap gui/$(id -u) \
+       ~/Library/LaunchAgents/com.northwindlabs.morning-brief.plist
+
+2. FULL DISK ACCESS, if the job dies at once with the Basso notification and an empty
+   brief. macOS protects ~/Desktop, ~/Documents, ~/Downloads and iCloud Drive with TCC,
+   and a launchd agent inherits none of the terminal's grants; that is the trap
+   scripts/weekly-backup documents at length. It does not always bite here, because the
+   interpreter you point PY at may already hold a grant. So treat this as the diagnostic,
+   not a precondition: if the job dies instantly, go to System Settings > Privacy and
+   Security > Full Disk Access > + > Cmd Shift G > paste the $PY path.
+
+3. Verify without waiting for the clock:
+
+     launchctl kickstart -k gui/$(id -u)/com.northwindlabs.morning-brief
+     sleep 90 && tail -20 "$R/outputs/ops/briefs/launchd.log"
+
+UNINSTALL:
+
+     launchctl bootout gui/$(id -u)/com.northwindlabs.morning-brief
+     rm ~/Library/LaunchAgents/com.northwindlabs.morning-brief.plist
+
+NOT ON macOS (Linux, WSL). launchd and the plist do not apply; the script itself is
+portable. Schedule it with cron instead, weekdays 09:07 local:
+
+     R=$(git rev-parse --show-toplevel)
+     ( crontab -l 2>/dev/null; echo "7 9 * * 1-5 cd $R && python3 scripts/morning-brief --quiet >> $R/outputs/ops/briefs/cron.log 2>&1" ) | crontab -
+
+The desktop notification is osascript and is skipped off macOS; the brief file is still
+written and that is the channel that matters.
+"""
+
+import re
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+OUT_DIR = REPO / "outputs" / "ops" / "briefs"
+LOGBOOK = REPO / "knowledge" / "ops" / "logbook" / "LOGBOOK.md"
+
+# Sections that talk to the network, as (title, argv). Empty by default: nothing that ships
+# in this template calls out. The hook exists because a remote pull is the first section most
+# operators add (a CRM, a funnel sheet, an inbox), and a brief that hangs for ninety seconds
+# on a dead provider stops getting read. Register it here and --no-network covers it.
+NETWORK_SECTIONS = []
+
+
+def run(cmd, timeout=900):
+    try:
+        r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=timeout)
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        if not out and err:
+            return f"({err.splitlines()[-1][:200]})"
+        return out or "(no output)"
+    except subprocess.TimeoutExpired:
+        return f"(timed out after {timeout}s)"
+    except Exception as e:
+        return f"(failed: {e})"
+
+
+def section(title, body):
+    return f"## {title}\n\n{body.rstrip()}\n"
+
+
+def logbook_state():
+    if not LOGBOOK.exists():
+        return "(LOGBOOK.md not found)"
+    text = LOGBOOK.read_text()
+    m = re.search(r"##\s*LAST LOGGED\s*\n+```\n(.*?)\n```", text, re.S)
+    cursor = m.group(1).strip() if m else "(cursor block not found)"
+    lines = [cursor]
+    # An OPEN previous day must be closed before a new /plan (standing rule).
+    rows = re.findall(r"^\|\s*(\d{4}-\d{2}-\d{2})\s*\|.*?\|\s*([^|]+?)\s*\|\s*$", text, re.M)
+    if rows:
+        last_date, last_status = rows[-1]
+        lines.append("")
+        lines.append(f"last row: {last_date} -> {last_status}")
+        if "OPEN" in last_status.upper():
+            lines.append(f"!! {last_date} is still OPEN. Close it before /plan opens a new day.")
+    return "\n".join(lines)
+
+
+def tree_state():
+    out = run(["git", "status", "--porcelain", "outputs/", "knowledge/"], timeout=60)
+    if out == "(no output)" or not out.strip():
+        return "clean, nothing uncommitted in outputs/ or knowledge/"
+    n = len(out.splitlines())
+    return (f"{n} uncommitted path(s). Parallel per-engagement chats make this normal, not an "
+            f"anomaly, but a day's numbers are wrong until these are read (ai/ERRORS.md: a "
+            f"close once spoke two wrong numbers because uncommitted cross-lane work was "
+            f"never read):\n\n{out}")
+
+
+def notify(msg: str) -> None:
+    """Desktop notification, macOS only (osascript). Best effort, never fatal; skipped
+    with one line elsewhere, because the written brief is the real channel."""
+    if sys.platform != "darwin":
+        print("morning-brief: desktop notification skipped (osascript is macOS-only; "
+              "schedule with cron off macOS, see the docstring)", file=sys.stderr)
+        return
+    subprocess.run(["osascript", "-e",
+                    f'display notification "{msg}" with title "Operator OS brief"'],
+                   capture_output=True)
+
+
+def main(argv):
+    if "--help" in argv or "-h" in argv:
+        print((__doc__ or "").strip())
+        return
+    offline = "--no-network" in argv
+    quiet = "--quiet" in argv
+    only_stdout = "--stdout" in argv
+    today = date.today()
+    dow = today.strftime("%a")
+
+    parts = [f"# Morning brief {today.isoformat()} ({dow})", ""]
+    if dow in ("Sat", "Sun"):
+        parts.append("Weekend. Not a workday unless Sam declared it one IN ADVANCE "
+                     "(daily-log hard rule 6). This brief is context, not a nudge.")
+        parts.append("")
+
+    parts.append(section("Clock (horizon)", run(["python3", "scripts/horizon"], timeout=120)))
+    parts.append(section("Logbook cursor", logbook_state()))
+    parts.append(section("Working tree", tree_state()))
+
+    for title, cmd in NETWORK_SECTIONS:
+        parts.append(section(title, "(skipped, --no-network)" if offline else run(cmd)))
+
+    parts.append(section("Standing", (
+        "The standing daily contract items are owned by knowledge/memory.md and carry "
+        "automatically on a workday. This brief does not restate them and does not add tasks: "
+        "the day's list is Sam's to fill (daily-log hard rule 2). Open the day with /plan.")))
+
+    body = "\n".join(parts)
+
+    if not only_stdout:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        path = OUT_DIR / f"{today.isoformat()}.md"
+        path.write_text(body)
+        stamp = datetime.now().strftime("%H:%M")
+        notify(f"Brief ready, {stamp}. Open outputs/ops/briefs/{today.isoformat()}.md")
+        if not quiet:
+            print(body)
+            print(f"\n(written to {path})")
+    else:
+        print(body)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

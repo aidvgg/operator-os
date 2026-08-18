@@ -1,0 +1,530 @@
+{
+  "schema_version": 1,
+  "canonical_contract": "CLAUDE.md",
+  "workflows": [
+    {
+      "id": "daily-log",
+      "canonical_skill": "skills/daily-log/SKILL.md",
+      "description": "Maintain Sam's daily operating logbook for planning, standup, end-of-day logging, and weekly review.",
+      "modes": [
+        {
+          "id": "plan",
+          "command": "/plan",
+          "aliases": [
+            "/plan",
+            "plan my day",
+            "plan the day",
+            "let's plan my day",
+            "let's plan the day",
+            "daily plan",
+            "daily planning"
+          ],
+          "first_turn_actions": [
+            "read_canonical_skill",
+            "load_live_repository_context_before_intake",
+            "surface_commitments_then_ask_missing_inputs",
+            "reject_invented_tasks"
+          ],
+          "capabilities": {
+            "required": [
+              "repository_read"
+            ],
+            "optional": [
+              "repository_write",
+              "calendar_read_today",
+              "calendar_create_time_block"
+            ]
+          },
+          "fallbacks": [
+            {
+              "capability": "calendar_read_today",
+              "action": "ask_fixed_events_after_context_then_continue"
+            },
+            {
+              "capability": "calendar_create_time_block",
+              "action": "continue_without_calendar_sync_or_fake_ids"
+            },
+            {
+              "capability": "repository_write",
+              "action": "return_exact_plan_draft_as_not_logged"
+            }
+          ],
+          "platform_exceptions": [
+            {
+              "platform": "Claude Code",
+              "alias": "/plan",
+              "reason": "Claude Code owns /plan as its built-in plan-mode command. Use a natural-language planning alias for the daily log."
+            },
+            {
+              "platform": "Codex and AGENTS.md-compatible agents",
+              "alias": "/plan",
+              "reason": "Codex owns /plan as its built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log."
+            },
+            {
+              "platform": "Codex and Agent Skills-compatible agents",
+              "alias": "/plan",
+              "reason": "Codex owns /plan as its built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log."
+            }
+          ]
+        },
+        {
+          "id": "standup",
+          "command": "/standup",
+          "aliases": [
+            "/standup",
+            "standup",
+            "daily standup"
+          ],
+          "capabilities": {
+            "required": [
+              "repository_read"
+            ],
+            "optional": [
+              "calendar_read_today"
+            ]
+          },
+          "fallbacks": [
+            {
+              "capability": "calendar_read_today",
+              "action": "omit_next_calendar_item_and_continue"
+            }
+          ]
+        },
+        {
+          "id": "eod",
+          "command": "/eod",
+          "aliases": [
+            "/eod",
+            "eod",
+            "log my day",
+            "end of day",
+            "close the day"
+          ],
+          "capabilities": {
+            "required": [
+              "repository_read"
+            ],
+            "optional": [
+              "repository_write"
+            ]
+          },
+          "fallbacks": [
+            {
+              "capability": "repository_write",
+              "action": "return_exact_eod_update_as_not_logged"
+            }
+          ]
+        },
+        {
+          "id": "weekly",
+          "command": "/weekly",
+          "aliases": [
+            "/weekly",
+            "weekly review",
+            "weekly retro"
+          ],
+          "capabilities": {
+            "required": [
+              "repository_read"
+            ],
+            "optional": [
+              "repository_write"
+            ]
+          },
+          "fallbacks": [
+            {
+              "capability": "repository_write",
+              "action": "return_exact_weekly_review_as_not_logged"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "generated_surfaces": {
+    "agent_entrypoints": [
+      {
+        "path": "AGENTS.md",
+        "platform": "Codex and AGENTS.md-compatible agents"
+      },
+      {
+        "path": "GEMINI.md",
+        "platform": "Gemini CLI"
+      },
+      {
+        "path": ".github/copilot-instructions.md",
+        "platform": "GitHub Copilot"
+      }
+    ],
+    "skill_entrypoints": [
+      {
+        "path": ".agents/skills/daily-log/SKILL.md",
+        "platform": "Codex and Agent Skills-compatible agents",
+        "workflow": "daily-log"
+      },
+      {
+        "path": ".claude/skills/daily-log/SKILL.md",
+        "platform": "Claude Code",
+        "workflow": "daily-log"
+      }
+    ],
+    "claude_commands": [
+      {
+        "path": ".claude/commands/standup.md",
+        "mode": "standup"
+      },
+      {
+        "path": ".claude/commands/eod.md",
+        "mode": "eod"
+      },
+      {
+        "path": ".claude/commands/weekly.md",
+        "mode": "weekly"
+      }
+    ],
+    "skill_adapters": [
+      {
+        "path": ".agents/skills/analytics-tracking/SKILL.md",
+        "skill": "analytics-tracking",
+        "canonical_skill": "skills/analytics-tracking/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Set up, improve, or audit analytics and measurement: GA4, Google Tag Manager, conversion and event tracking, UTM parameters, tracking plans."
+      },
+      {
+        "path": ".claude/skills/analytics-tracking/SKILL.md",
+        "skill": "analytics-tracking",
+        "canonical_skill": "skills/analytics-tracking/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Set up, improve, or audit analytics and measurement: GA4, Google Tag Manager, conversion and event tracking, UTM parameters, tracking plans."
+      },
+      {
+        "path": ".agents/skills/app-store-screenshots/SKILL.md",
+        "skill": "app-store-screenshots",
+        "canonical_skill": "skills/app-store-screenshots/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Build App Store screenshot pages and programmatic marketing-screenshot generators for an iOS release."
+      },
+      {
+        "path": ".claude/skills/app-store-screenshots/SKILL.md",
+        "skill": "app-store-screenshots",
+        "canonical_skill": "skills/app-store-screenshots/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Build App Store screenshot pages and programmatic marketing-screenshot generators for an iOS release."
+      },
+      {
+        "path": ".agents/skills/business-profile-creator/SKILL.md",
+        "skill": "business-profile-creator",
+        "canonical_skill": "skills/business-profile-creator/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Update the operator's business profile JSON by read-and-merge. Trigger on update the business profile, refresh the profile JSON. Reads the existing profile and memory.md before asking anything."
+      },
+      {
+        "path": ".claude/skills/business-profile-creator/SKILL.md",
+        "skill": "business-profile-creator",
+        "canonical_skill": "skills/business-profile-creator/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Update the operator's business profile JSON by read-and-merge. Trigger on update the business profile, refresh the profile JSON. Reads the existing profile and memory.md before asking anything."
+      },
+      {
+        "path": ".agents/skills/copy-editing/SKILL.md",
+        "skill": "copy-editing",
+        "canonical_skill": "skills/copy-editing/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Systematic multi-pass edit of existing marketing copy. Trigger on edit this copy, review my copy, proofread, polish this, copy sweep."
+      },
+      {
+        "path": ".claude/skills/copy-editing/SKILL.md",
+        "skill": "copy-editing",
+        "canonical_skill": "skills/copy-editing/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Systematic multi-pass edit of existing marketing copy. Trigger on edit this copy, review my copy, proofread, polish this, copy sweep."
+      },
+      {
+        "path": ".agents/skills/copywriting/SKILL.md",
+        "skill": "copywriting",
+        "canonical_skill": "skills/copywriting/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Write or rewrite marketing copy for a homepage, landing, pricing, feature, about, or product page. Trigger on write copy for, rewrite this page, headline help."
+      },
+      {
+        "path": ".claude/skills/copywriting/SKILL.md",
+        "skill": "copywriting",
+        "canonical_skill": "skills/copywriting/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Write or rewrite marketing copy for a homepage, landing, pricing, feature, about, or product page. Trigger on write copy for, rewrite this page, headline help."
+      },
+      {
+        "path": ".agents/skills/hard-task/SKILL.md",
+        "skill": "hard-task",
+        "canonical_skill": "skills/hard-task/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Tier-2 protocol for high-stakes work no other skill covers: legal, tax, banking, entity, relocation, canonical knowledge rewrites, repo reorganization, irreversible client-facing moves."
+      },
+      {
+        "path": ".claude/skills/hard-task/SKILL.md",
+        "skill": "hard-task",
+        "canonical_skill": "skills/hard-task/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Tier-2 protocol for high-stakes work no other skill covers: legal, tax, banking, entity, relocation, canonical knowledge rewrites, repo reorganization, irreversible client-facing moves."
+      },
+      {
+        "path": ".agents/skills/harvest/SKILL.md",
+        "skill": "harvest",
+        "canonical_skill": "skills/harvest/SKILL.md",
+        "tier": "first-party",
+        "trigger": "End-of-session content harvest. Trigger on harvest this session, pull content seeds, any content in this. Writes 1-3 receipt-backed X-voice seeds to outputs and never posts."
+      },
+      {
+        "path": ".claude/skills/harvest/SKILL.md",
+        "skill": "harvest",
+        "canonical_skill": "skills/harvest/SKILL.md",
+        "tier": "first-party",
+        "trigger": "End-of-session content harvest. Trigger on harvest this session, pull content seeds, any content in this. Writes 1-3 receipt-backed X-voice seeds to outputs and never posts."
+      },
+      {
+        "path": ".agents/skills/invoice-creator/SKILL.md",
+        "skill": "invoice-creator",
+        "canonical_skill": "skills/invoice-creator/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Issue or reissue a branded invoice. Trigger on invoice this client, bill for agreed work, send an invoice. Takes the number from the ledger and the wire block from the payment file, never from recall."
+      },
+      {
+        "path": ".claude/skills/invoice-creator/SKILL.md",
+        "skill": "invoice-creator",
+        "canonical_skill": "skills/invoice-creator/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Issue or reissue a branded invoice. Trigger on invoice this client, bill for agreed work, send an invoice. Takes the number from the ledger and the wire block from the payment file, never from recall."
+      },
+      {
+        "path": ".agents/skills/landing-page/SKILL.md",
+        "skill": "landing-page",
+        "canonical_skill": "skills/landing-page/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Design or rewrite a high-converting single-offer landing page: structure, layout patterns, conversion strategy, copy, SEO, common pitfalls."
+      },
+      {
+        "path": ".claude/skills/landing-page/SKILL.md",
+        "skill": "landing-page",
+        "canonical_skill": "skills/landing-page/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Design or rewrite a high-converting single-offer landing page: structure, layout patterns, conversion strategy, copy, SEO, common pitfalls."
+      },
+      {
+        "path": ".agents/skills/make-interfaces-feel-better/SKILL.md",
+        "skill": "make-interfaces-feel-better",
+        "canonical_skill": "skills/make-interfaces-feel-better/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Design-engineering details that make an interface feel polished: animation, hover states, shadows, borders, typography, optical alignment, micro-interactions."
+      },
+      {
+        "path": ".claude/skills/make-interfaces-feel-better/SKILL.md",
+        "skill": "make-interfaces-feel-better",
+        "canonical_skill": "skills/make-interfaces-feel-better/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Design-engineering details that make an interface feel polished: animation, hover states, shadows, borders, typography, optical alignment, micro-interactions."
+      },
+      {
+        "path": ".agents/skills/ogilvy/SKILL.md",
+        "skill": "ogilvy",
+        "canonical_skill": "skills/ogilvy/SKILL.md",
+        "tier": "vendored",
+        "trigger": "David Ogilvy's advertising principles for copy that sells: positioning, headlines, promises, brand voice, long-form copy, visual logic."
+      },
+      {
+        "path": ".claude/skills/ogilvy/SKILL.md",
+        "skill": "ogilvy",
+        "canonical_skill": "skills/ogilvy/SKILL.md",
+        "tier": "vendored",
+        "trigger": "David Ogilvy's advertising principles for copy that sells: positioning, headlines, promises, brand voice, long-form copy, visual logic."
+      },
+      {
+        "path": ".agents/skills/operational-enterprise-ai/SKILL.md",
+        "skill": "operational-enterprise-ai",
+        "canonical_skill": "skills/operational-enterprise-ai/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Enterprise AI, automation, security, and operations product pages: system boundaries, approvals, auditability, exceptions, rollback, security proof."
+      },
+      {
+        "path": ".claude/skills/operational-enterprise-ai/SKILL.md",
+        "skill": "operational-enterprise-ai",
+        "canonical_skill": "skills/operational-enterprise-ai/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Enterprise AI, automation, security, and operations product pages: system boundaries, approvals, auditability, exceptions, rollback, security proof."
+      },
+      {
+        "path": ".agents/skills/page-cro/SKILL.md",
+        "skill": "page-cro",
+        "canonical_skill": "skills/page-cro/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Conversion-rate optimization for any marketing page. Trigger on CRO, this page is not converting, improve conversions, why is this page not working."
+      },
+      {
+        "path": ".claude/skills/page-cro/SKILL.md",
+        "skill": "page-cro",
+        "canonical_skill": "skills/page-cro/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Conversion-rate optimization for any marketing page. Trigger on CRO, this page is not converting, improve conversions, why is this page not working."
+      },
+      {
+        "path": ".agents/skills/pricing-page/SKILL.md",
+        "skill": "pricing-page",
+        "canonical_skill": "skills/pricing-page/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Design or rewrite a high-converting SaaS pricing page: plan design, structure, copy, FAQs, layout patterns, experiments."
+      },
+      {
+        "path": ".claude/skills/pricing-page/SKILL.md",
+        "skill": "pricing-page",
+        "canonical_skill": "skills/pricing-page/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Design or rewrite a high-converting SaaS pricing page: plan design, structure, copy, FAQs, layout patterns, experiments."
+      },
+      {
+        "path": ".agents/skills/product-proof-saas/SKILL.md",
+        "skill": "product-proof-saas",
+        "canonical_skill": "skills/product-proof-saas/SKILL.md",
+        "tier": "vendored",
+        "trigger": "SaaS and AI product landing pages where a real workflow, interface, or deterministic demo is the central proof rather than a broad claim."
+      },
+      {
+        "path": ".claude/skills/product-proof-saas/SKILL.md",
+        "skill": "product-proof-saas",
+        "canonical_skill": "skills/product-proof-saas/SKILL.md",
+        "tier": "vendored",
+        "trigger": "SaaS and AI product landing pages where a real workflow, interface, or deterministic demo is the central proof rather than a broad claim."
+      },
+      {
+        "path": ".agents/skills/proposal-creator/SKILL.md",
+        "skill": "proposal-creator",
+        "canonical_skill": "skills/proposal-creator/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Generate a branded proposal, quote, SOW, or service agreement as print HTML rendered to PDF. Trigger on create a proposal, write a quote, SOW for a project, proposal for a client."
+      },
+      {
+        "path": ".claude/skills/proposal-creator/SKILL.md",
+        "skill": "proposal-creator",
+        "canonical_skill": "skills/proposal-creator/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Generate a branded proposal, quote, SOW, or service agreement as print HTML rendered to PDF. Trigger on create a proposal, write a quote, SOW for a project, proposal for a client."
+      },
+      {
+        "path": ".agents/skills/prospect-brief/SKILL.md",
+        "skill": "prospect-brief",
+        "canonical_skill": "skills/prospect-brief/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Turn a profile URL or a name into a decision-ready outbound prospect brief with a qualification-gate verdict, a pain-bank match, and opener prep. Trigger on brief this prospect, triage these accepts, screen this batch."
+      },
+      {
+        "path": ".claude/skills/prospect-brief/SKILL.md",
+        "skill": "prospect-brief",
+        "canonical_skill": "skills/prospect-brief/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Turn a profile URL or a name into a decision-ready outbound prospect brief with a qualification-gate verdict, a pain-bank match, and opener prep. Trigger on brief this prospect, triage these accepts, screen this batch."
+      },
+      {
+        "path": ".agents/skills/research-doctrine/SKILL.md",
+        "skill": "research-doctrine",
+        "canonical_skill": "skills/research-doctrine/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Epistemic assurance for research, synthesis, validation, due diligence, and decisions. Trigger when external evidence, current facts, multiple sources, disputed claims, recommendations, or silent omissions could matter."
+      },
+      {
+        "path": ".claude/skills/research-doctrine/SKILL.md",
+        "skill": "research-doctrine",
+        "canonical_skill": "skills/research-doctrine/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Epistemic assurance for research, synthesis, validation, due diligence, and decisions. Trigger when external evidence, current facts, multiple sources, disputed claims, recommendations, or silent omissions could matter."
+      },
+      {
+        "path": ".agents/skills/schema-markup/SKILL.md",
+        "skill": "schema-markup",
+        "canonical_skill": "skills/schema-markup/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Structured data and JSON-LD schema markup for search engines and AI answer surfaces, including validation and common markup mistakes."
+      },
+      {
+        "path": ".claude/skills/schema-markup/SKILL.md",
+        "skill": "schema-markup",
+        "canonical_skill": "skills/schema-markup/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Structured data and JSON-LD schema markup for search engines and AI answer surfaces, including validation and common markup mistakes."
+      },
+      {
+        "path": ".agents/skills/seo-audit/SKILL.md",
+        "skill": "seo-audit",
+        "canonical_skill": "skills/seo-audit/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Audit a site for technical SEO, on-page, and content issues, then rank the fixes by impact. Trigger on SEO audit, why are we not ranking, check our SEO."
+      },
+      {
+        "path": ".claude/skills/seo-audit/SKILL.md",
+        "skill": "seo-audit",
+        "canonical_skill": "skills/seo-audit/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Audit a site for technical SEO, on-page, and content issues, then rank the fixes by impact. Trigger on SEO audit, why are we not ranking, check our SEO."
+      },
+      {
+        "path": ".agents/skills/stop-slop/SKILL.md",
+        "skill": "stop-slop",
+        "canonical_skill": "skills/stop-slop/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Strip AI-slop tells out of drafted copy. Supplement to the binding copy rules in knowledge/voice/copy-rules.md, never a replacement for them."
+      },
+      {
+        "path": ".claude/skills/stop-slop/SKILL.md",
+        "skill": "stop-slop",
+        "canonical_skill": "skills/stop-slop/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Strip AI-slop tells out of drafted copy. Supplement to the binding copy rules in knowledge/voice/copy-rules.md, never a replacement for them."
+      },
+      {
+        "path": ".agents/skills/tailwind-v4/SKILL.md",
+        "skill": "tailwind-v4",
+        "canonical_skill": "skills/tailwind-v4/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Tailwind CSS v4 conventions, configuration, and migration for client-build and site work."
+      },
+      {
+        "path": ".claude/skills/tailwind-v4/SKILL.md",
+        "skill": "tailwind-v4",
+        "canonical_skill": "skills/tailwind-v4/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Tailwind CSS v4 conventions, configuration, and migration for client-build and site work."
+      },
+      {
+        "path": ".agents/skills/visual-style-presets/SKILL.md",
+        "skill": "visual-style-presets",
+        "canonical_skill": "skills/visual-style-presets/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Named visual style presets for choosing and committing to a coherent look on a page or app build."
+      },
+      {
+        "path": ".claude/skills/visual-style-presets/SKILL.md",
+        "skill": "visual-style-presets",
+        "canonical_skill": "skills/visual-style-presets/SKILL.md",
+        "tier": "vendored",
+        "trigger": "Named visual style presets for choosing and committing to a coherent look on a page or app build."
+      },
+      {
+        "path": ".agents/skills/web-design-guidelines/SKILL.md",
+        "skill": "web-design-guidelines",
+        "canonical_skill": "skills/web-design-guidelines/SKILL.md",
+        "tier": "vendored",
+        "trigger": "General web design and build guidelines for pages and interfaces: layout, spacing, hierarchy, responsive behavior, accessibility."
+      },
+      {
+        "path": ".claude/skills/web-design-guidelines/SKILL.md",
+        "skill": "web-design-guidelines",
+        "canonical_skill": "skills/web-design-guidelines/SKILL.md",
+        "tier": "vendored",
+        "trigger": "General web design and build guidelines for pages and interfaces: layout, spacing, hierarchy, responsive behavior, accessibility."
+      }
+    ]
+  },
+  "required_existing": [
+    {
+      "path": "CLAUDE.md",
+      "must_contain": "skills/daily-log"
+    }
+  ]
+}

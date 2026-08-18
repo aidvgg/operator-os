@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""money - the metabolism. Generates knowledge/business/MONEY.md from SUMMARY.md.
+
+Usage:
+  scripts/money                       parse the live register, (re)write MONEY.md
+  scripts/money --summary <path>      parse an alternate register (tests)
+  scripts/money --out <path>          write the rollup elsewhere (tests)
+
+SUMMARY.md's `## Register` table is the ONLY cash authority. This script computes
+ONLY what the source contains: collected, outstanding, trailing 3-month collected
+run-rate, and concentration by owner via an explicit alias map. It FAILS LOUD
+(nonzero exit, writes nothing) on an unparseable row, a missing Register table, or
+a computed total that disagrees with the register's own `## Cash status` lines.
+
+An EMPTY register is not one of those failures. A well formed table with zero data
+rows is the correct state on a fresh clone and between invoices, so it produces a
+zeroed rollup and exit 0. See the long note in parse_register for why the two cases
+must stay apart.
+
+Two windows, on purpose. The run-rate covers the 3 calendar months ending THIS month and
+labels the running month partial. The cash floor gate judges the 3 most recent COMPLETED
+months, because a gate is defined on a month and an unfinished month is not one yet.
+
+Targets are printed as REFERENCE lines only, they are NOT computed: no cash-balance
+source exists in SUMMARY.md.
+
+Fixed costs are hardcoded below and cited from knowledge/ops/tools-and-stack.md.
+"""
+import argparse
+import calendar
+import re
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+ROOT = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True).stdout.strip() or ".")
+DEFAULT_SUMMARY = ROOT / "knowledge/business/invoices/SUMMARY.md"
+DEFAULT_OUT = ROOT / "knowledge/business/MONEY.md"
+
+# --- Fixed monthly costs. knowledge/ops/tools-and-stack.md OWNS these numbers; this list is a
+#     copy, and a copy is a future stale line, so each entry names the file and says why it
+#     exists. Change the number there first, then here. A cost with a known end date says so in
+#     its citation, so the line gets deleted when the plan runs out instead of quietly inflating
+#     burn forever. Keep this list to what actually leaves the account every month. ---
+FIXED_COSTS = [
+    ("LinkedIn Sales Navigator", 100, "tools-and-stack.md - sourcing seat for the outbound motion"),
+    ("VPS + hosting", 20, "tools-and-stack.md - the always-on box that runs the scheduled jobs"),
+    ("AI API usage", 40, "tools-and-stack.md - metered spend for the agent scripts, not a subscription"),
+    ("Accounting software", 30, "tools-and-stack.md - monthly books for the operating entity"),
+]
+
+# --- Owner alias map for concentration. Concentration is the whole point of this section, and
+#     a client that bills through more than one entity fakes a split that does not exist: two
+#     names, one beneficial owner, one phone call away from being 100% of revenue. Map every
+#     spelling and every subsidiary of one payer to one owner string. An unmapped bill-to is
+#     NOT silently merged, it keeps its own name and gets called out in the report, because
+#     guessing at who owns whom is how a false diversification claim gets written down. ---
+OWNER_ALIASES = [
+    (re.compile(r"acme", re.I), "Acme Retail"),
+    (re.compile(r"beacon", re.I), "Beacon Health"),
+]
+
+# Reference targets (NOT computed, there is no cash-balance source in SUMMARY.md).
+TARGET_RECURRING = 12000
+TARGET_BUFFER = 25000
+
+# Payment-date discipline. The register records a payment as `**PAID YYYY-MM-DD**` in the
+# Status cell (see NL-2026-001). Every invoice issued on or after this date must carry the
+# payment date, or this script refuses to compute a collected run-rate on a guessed month.
+# Anything issued BEFORE it is grandfathered, which is the slot for invoices imported from an
+# older system that never recorded payment dates. Move the date, do not weaken the rule.
+LEDGER_RESTART = date(2026, 1, 1)  # the date this ledger's date convention starts
+
+# Cash floor gate. The one pre-registered threshold that gates an irreversible move: signing a
+# lease, taking on a fixed cost, dropping the last retainer. Definition: the WORST month of the
+# three most recent COMPLETED months must clear the floor. Worst, not average, because an
+# average hides the month that would have broken you and the whole point of a gate is the bad
+# month. Only the income leg is computable here; a cash-cushion leg has no source in the
+# register, the same reason the buffer target is printed as reference only.
+FLOOR_GATE_FLOOR = 6000
+# Point this at the file that OWNS the number once you set your own. A dated ai/DECISIONS.md row
+# is the right owner: it carries the ruling and its review date, so the gate gets re-argued on a
+# schedule instead of drifting. Name a section, never a line number: a printed line citation rots
+# into a false pointer inside a generated file that reprints it on every run.
+FLOOR_GATE_OWNER = ("scripts/money, FLOOR_GATE_FLOOR (template placeholder). Set your own number, "
+                    "record the ruling as a dated row in ai/DECISIONS.md, and cite that row here.")
+
+
+def die(msg: str) -> "NoReturn":
+    print(f"money: FAIL - {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def owner_of(bill_to: str):
+    """Return (owner, is_known). Unknown bill-to keeps its own name."""
+    for pat, owner in OWNER_ALIASES:
+        if pat.search(bill_to):
+            return owner, True
+    return bill_to.strip(), False
+
+
+def money_to_int(cell: str, ctx: str) -> int:
+    m = re.search(r"\$\s*([\d,]+)", cell)
+    if not m:
+        die(f"unparseable amount in {ctx}: {cell!r}")
+    return int(m.group(1).replace(",", ""))
+
+
+def split_row(line: str):
+    """Split a markdown pipe row into stripped cells (drops leading/trailing empties)."""
+    parts = [c.strip() for c in line.strip().strip("|").split("|")]
+    return parts
+
+
+def parse_register(text: str):
+    """Return (rows, meta). rows is a list of dicts: {num, amount, bill_to, status, month}.
+    meta carries what the table looked like: {"data_lines", "struck"}. FAILS LOUD on anything
+    unreadable, and returns an empty list for a well formed table that holds nothing.
+    """
+    lines = text.splitlines()
+    # locate the '## Register' section
+    start = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^##\s+Register\b", ln.strip()):
+            start = i
+            break
+    if start is None:
+        die("no '## Register' section found in summary")
+
+    # find the header row (first pipe line after the heading) and its columns
+    header_idx = None
+    for i in range(start + 1, len(lines)):
+        s = lines[i].strip()
+        if s.startswith("##"):
+            break
+        if s.startswith("|"):
+            header_idx = i
+            break
+    if header_idx is None:
+        die("no table found under '## Register'")
+
+    header = [h.lower() for h in split_row(lines[header_idx])]
+
+    def col(name):
+        for j, h in enumerate(header):
+            if name in h:
+                return j
+        die(f"Register table missing a '{name}' column (header: {header})")
+
+    c_inv = col("invoice")
+    c_amt = col("amount")
+    c_bill = col("bill to")
+    c_status = col("status")
+    c_date = col("date issued")
+
+    rows = []
+    data_lines = 0      # table lines seen under the separator, readable or not
+    struck = 0          # of those, ones skipped as voided/superseded
+    # data rows start two lines below the header (header + separator)
+    if header_idx + 1 >= len(lines):
+        die("Register table header has no separator row under it")
+    sep = lines[header_idx + 1].strip()
+    if not re.match(r"^\|[\s:|-]+\|?$", sep):
+        die(f"expected a table separator row under the header, got: {sep!r}")
+
+    for i in range(header_idx + 2, len(lines)):
+        s = lines[i].strip()
+        if not s.startswith("|"):
+            break  # table ended
+        data_lines += 1
+        cells = split_row(lines[i])
+        needed = max(c_inv, c_amt, c_bill, c_status, c_date)
+        if len(cells) <= needed:
+            die(f"row {i + 1} has too few cells ({len(cells)}): {s!r}")
+
+        inv_cell = cells[c_inv]
+        # skip struck-through rows (superseded/void): Invoice cell wrapped in ~~
+        if "~~" in inv_cell:
+            struck += 1
+            continue
+
+        m = re.search(r"(NL-\d{4}-\w+)", inv_cell)
+        if not m:
+            die(f"row {i + 1} has no invoice number in Invoice cell: {inv_cell!r}")
+        num = m.group(1)
+
+        amount = money_to_int(cells[c_amt], f"row {i + 1} ({num})")
+
+        bill_to = cells[c_bill]
+        if not bill_to:
+            die(f"row {i + 1} ({num}) has an empty Bill-to cell")
+
+        status_cell = cells[c_status]
+        if not status_cell:
+            die(f"row {i + 1} ({num}) has an empty Status cell")
+        # PAID iff the Status cell carries a bold PAID marker; else OPEN.
+        paid = bool(re.search(r"\*\*\s*PAID\b", status_cell))
+
+        date_cell = cells[c_date]
+        dm = re.search(r"(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})", date_cell)
+        if not dm:
+            die(f"row {i + 1} ({num}) has an unparseable Date-issued cell: {date_cell!r}")
+        try:
+            issued = datetime.strptime(re.sub(r"\s+", " ", dm.group(1)), "%d %b %Y").date()
+        except ValueError:
+            try:
+                issued = datetime.strptime(re.sub(r"\s+", " ", dm.group(1)), "%d %B %Y").date()
+            except ValueError:
+                die(f"row {i + 1} ({num}) date not parseable: {dm.group(1)!r}")
+
+        # Payment month, not issue month: the run-rate and the floor gate are both defined on
+        # collected cash. Anchored to the PAID token so a trailing audit note such as
+        # "(confirmed against the bank feed 2026-08-01)" is never mistaken for a payment date.
+        paid_on = None
+        pm = re.search(r"\*\*\s*PAID\s+(\d{4}-\d{2}-\d{2})", status_cell)
+        if pm:
+            try:
+                paid_on = date.fromisoformat(pm.group(1))
+            except ValueError:
+                die(f"row {i + 1} ({num}) has an unparseable PAID date: {pm.group(1)!r}")
+            if paid_on < issued:
+                die(f"row {i + 1} ({num}) records payment {paid_on} before issue {issued}")
+            # Collected means cash already in the account. A future payment date passes
+            # every other check here (the register's own Cash-status cross-check restates
+            # the same wrong total), counts unarrived money as collected, and buckets it
+            # OUT of the trailing window, moving the run-rate and the floor gate at once.
+            if paid_on > date.today():
+                die(f"row {i + 1} ({num}) records payment {paid_on}, which is in the "
+                    f"future (today is {date.today().isoformat()}). Collected is cash "
+                    f"already received; a future date inflates the collected total and "
+                    f"drops the amount out of the trailing window.")
+        if paid and paid_on is None and issued >= LEDGER_RESTART:
+            die(f"row {i + 1} ({num}) is PAID with no payment date. Record it as "
+                f"'**PAID YYYY-MM-DD**' in the Status cell. Every invoice issued on or after "
+                f"{LEDGER_RESTART.isoformat()} must carry one, because the run-rate and the "
+                f"floor gate bucket by payment month. Invoices issued before that date are "
+                f"grandfathered, see LEDGER_RESTART in scripts/money.")
+
+        rows.append({
+            "num": num,
+            "amount": amount,
+            "bill_to": bill_to,
+            "paid": paid,
+            "issued": issued,
+            "paid_on": paid_on,
+            "collected_month": ((paid_on.year, paid_on.month) if paid_on
+                                else (issued.year, issued.month)),
+            "month_basis": "paid" if paid_on else "issued",
+        })
+
+    # --- Empty is not the same failure as unreadable, and conflating them locks out a new
+    #     operator. SETUP's "clear the demo data" step leaves a register with headers, a
+    #     separator and zero rows. That is the correct state on day one and again between
+    #     invoices. A die() here refused to write MONEY.md at all, so the rollup kept holding
+    #     the previous numbers and repo-doctor carried a permanent money-drift warning until
+    #     the first real invoice. Both halves matter, so they are decided separately:
+    #
+    #     (a) Structure intact, zero data rows -> legitimate, return []. Everything above has
+    #         already proved the structure: the '## Register' heading, a header row, all five
+    #         required columns, and a real separator row. Nothing was skipped in silence. A
+    #         zero here means the register genuinely holds nothing, and a zeroed rollup is the
+    #         true answer, not a guess.
+    #     (b) Rows that exist but cannot be read -> fatal, and it stays fatal. That half is
+    #         enforced above, row by row, with the row number in the message: a missing invoice
+    #         number, an unparseable amount, an empty Bill-to or Status cell, a bad date, a
+    #         PAID row with no payment date. Never weaken it. Reporting $0 because an amount
+    #         cell was mangled is how a business gets told it earned nothing in a month it
+    #         earned plenty, and the operator has no way to see that the number is fiction.
+    #
+    #     A missing table, a missing column or a missing separator is case (b) as well, and
+    #     dies above: absent structure is not an empty register, it is an unreadable one.
+    #
+    #     The one remaining route to zero rows is a table whose every row was struck through,
+    #     i.e. every invoice voided. That is legitimate (skipping struck rows is by design),
+    #     but on screen it looks nothing like an empty table, so the counts travel out in meta
+    #     and the report says which case produced the zero. ---
+    return rows, {"data_lines": data_lines, "struck": struck}
+
+
+def register_stated(text: str, label: str):
+    """Pull a bolded '**<label>: $N**' figure from '## Cash status' for cross-check."""
+    m = re.search(r"\*\*\s*" + re.escape(label) + r":\s*\$\s*([\d,]+)\s*\*\*", text, re.I)
+    if not m:
+        return None
+    return int(m.group(1).replace(",", ""))
+
+
+def month_label(ym) -> str:
+    return f"{ym[0]:04d}-{ym[1]:02d}"
+
+
+# The Due/Stale grammar has ONE owner: scripts/clock_grammar.py. Loaded by path because the
+# consumers are extensionless executables, not an importable package. Three hand-copies of this
+# grammar used to exist and one edit widened exactly one of them, which is how money came to
+# reject the OS's own documented rollover shape while horizon accepted it.
+# The module is contractually side-effect free, so this load cannot exit the process.
+def _load_clock_grammar(script_dir):
+    import importlib.util
+    _p = Path(script_dir) / "clock_grammar.py"
+    if not _p.is_file():
+        return None, f"scripts/clock_grammar.py missing at {_p}"
+    try:
+        _spec = importlib.util.spec_from_file_location("clock_grammar", _p)
+        _m = importlib.util.module_from_spec(_spec)
+        _sys_dwb = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True          # never litter __pycache__ next to the scripts
+        try:
+            _spec.loader.exec_module(_m)
+        finally:
+            sys.dont_write_bytecode = _sys_dwb
+    except BaseException as e:                  # noqa: BLE001
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        return None, f"scripts/clock_grammar.py failed to load: {type(e).__name__}: {e}"
+    for _n in ("due_tokens", "struck_spans", "fenced_flags", "grammar_selfcheck"):
+        if not hasattr(_m, _n):
+            return None, f"scripts/clock_grammar.py is missing {_n}()"
+    return _m, None
+
+
+_CG, _CG_ERR = _load_clock_grammar(Path(__file__).resolve().parent)
+if _CG is None:
+    die(_CG_ERR + ". The Due grammar has one owner and money will not guess at it.")
+_bad = [lab for lab, ok in _CG.grammar_selfcheck() if not ok and lab.startswith("due")]
+if _bad:
+    die("clock_grammar selfcheck FAILED on the Due family: " + ", ".join(_bad)
+        + ". Refusing to judge receivables against a broken grammar.")
+# Tighter than parse_register's `NL-\d{4}-\w+`: this one runs against FILENAME stems such as
+# `NL-2026-004_Acme-Dashboard`, where `\w+` would swallow the `_Acme` suffix into the number.
+INVOICE_NUM_RE = re.compile(r"NL-\d{4}-\d+[A-Za-z]?")
+
+
+def armed_due_numbers(records_dir: Path):
+    """Invoice numbers carrying a line-start `**Due:** YYYY-MM-DD` line in THEIR OWN record
+    file, i.e. numbers scripts/horizon can actually see against the right invoice.
+
+    Ownership is the point of the check, not mere presence somewhere in the directory. A
+    flat scan that pooled every number found on every Due line let a line inside
+    NL-2026-009.md arm NL-2026-002, which is exactly what the die() message below tells the
+    operator is not allowed. So a number is armed only when the Due line lives in
+    <number>.md AND names that number, the shape the message asks for.
+
+    A struck line (~~...~~) is a resolved commitment, not an armed one. Date VALIDITY is
+    checked on every Due line in the directory, owned or not, because a typo'd date is
+    invisible to horizon wherever it sits.
+    """
+    armed = set()
+    if not records_dir.is_dir():
+        return armed
+    for p in sorted(records_dir.glob("*.md")):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # The record file for NL-2026-002 may be named NL-2026-002.md or
+        # NL-2026-002_Some-Project.md; both are the invoice's own record.
+        stem_m = INVOICE_NUM_RE.match(p.stem)
+        own = stem_m.group(0) if stem_m else None
+        _flags, _odd = _CG.fenced_flags(text.splitlines())
+        if _odd:
+            die(f"{p.name} has an unclosed ``` fence, so which Due lines are templates and "
+                f"which are commitments cannot be decided. Close the fence and rerun.")
+        for _i, line in enumerate(text.splitlines()):
+            if _flags[_i]:
+                continue            # inside a fence: a paste template, not a commitment
+            # Per TOKEN, never per line. `~~**Due:** <old>~~ **Due:** <new>` is the repo's
+            # documented rollover shape; a whole-line `"~~" in line` test called that
+            # receivable unarmed, exited 1, wrote nothing, and left repo-doctor's HARD
+            # money-stale demanding the file this script had just refused to produce.
+            _toks = _CG.due_tokens(line)
+            if not _toks:
+                continue
+            # Date SHAPE is not a date. scripts/horizon parses its own capture with
+            # date.fromisoformat inside a try/except and `continue`s on failure, so a
+            # typo'd date such as 2026-99-99 vanishes from OVERDUE / NEXT 14 DAYS in
+            # silence while still satisfying a shape-only test here. That combination
+            # arms a receivable in this check and leaves it invisible on the clock, the
+            # exact blind spot the check exists to close, so it fails loud instead.
+            for _datestr, _desc in _toks:
+                try:
+                    date.fromisoformat(_datestr)
+                except ValueError:
+                    die(f"{p.name} carries a Due line whose date is not a real calendar "
+                        f"date: {_datestr!r}. scripts/horizon drops such a line silently, "
+                        f"so the receivable would pass this check and still never reach the "
+                        f"clock. Fix the date.")
+                # Ownership is judged on the TOKEN's own description, not the physical line.
+                # On a rollover line the struck half carries the old text, and matching the
+                # whole line let retired text arm a receivable the live token does not name.
+                if own and own in INVOICE_NUM_RE.findall(_desc):
+                    armed.add(own)
+    return armed
+
+
+def months_ending_at(year: int, month: int, count: int = 3):
+    """`count` consecutive calendar months ending at (year, month), oldest first."""
+    window = []
+    for back in range(count - 1, -1, -1):
+        m, y = month - back, year
+        while m <= 0:
+            m += 12
+            y -= 1
+        window.append((y, m))
+    return window
+
+
+def trailing_window(today: date):
+    """The 3 calendar months ending at today's month, inclusive. The LAST one is partial."""
+    return months_ending_at(today.year, today.month)
+
+
+def completed_window(today: date):
+    """The 3 most recent COMPLETED calendar months, i.e. the window ending with LAST month.
+
+    This is the floor gate's window, and it is deliberately not the run-rate's. The gate is
+    defined on the worst trailing-3-month MONTH, and a month still running is not yet a month:
+    on the 1st it holds $0 by construction. Judging it would print FAIL for a business that
+    changed nothing overnight and PASS only in the last days of a month, so the single number
+    gating an irreversible move would swing on the calendar rather than on the cash. A gate
+    that cries wolf on a date is a gate the operator learns to ignore.
+    """
+    m, y = today.month - 1, today.year
+    if m == 0:
+        m, y = 12, y - 1
+    return months_ending_at(y, m)
+
+
+def by_collected_month(collected):
+    """PAYMENT-month buckets: (year, month) -> dollars collected."""
+    by_month = {}
+    for r in collected:
+        ym = r["collected_month"]
+        by_month[ym] = by_month.get(ym, 0) + r["amount"]
+    return by_month
+
+
+def collected_over(collected, window):
+    """Collected cash bucketed by PAYMENT month across an explicit window. Windows are
+    anchored to the calendar, never to the register's own latest row: a window that slides
+    with the data can never show a drought. Returns (per_month, avg, worst, worst_month)."""
+    by_month = by_collected_month(collected)
+    per = {ym: by_month.get(ym, 0) for ym in window}
+    avg = sum(per.values()) / float(len(window))
+    worst_ym = min(window, key=lambda ym: per[ym])
+    return per, avg, per[worst_ym], worst_ym
+
+
+def concentration(rows):
+    """owner -> dollars, plus total. Returns (dict, total, unknowns)."""
+    tally, unknowns = {}, set()
+    for r in rows:
+        owner, known = owner_of(r["bill_to"])
+        if not known:
+            unknowns.add(owner)
+        tally[owner] = tally.get(owner, 0) + r["amount"]
+    return tally, sum(tally.values()), unknowns
+
+
+def fmt_conc(tally, total):
+    lines = []
+    for owner, amt in sorted(tally.items(), key=lambda kv: -kv[1]):
+        pct = (amt / total * 100) if total else 0.0
+        lines.append(f"- {owner}: ${amt:,} ({pct:.1f}%)")
+    return lines
+
+
+def build_report(rows, summary_path: Path, meta=None):
+    collected = [r for r in rows if r["paid"]]
+    outstanding = [r for r in rows if not r["paid"]]
+    col_total = sum(r["amount"] for r in collected)
+    out_total = sum(r["amount"] for r in outstanding)
+
+    conc_all, tot_all, unk_all = concentration(rows)
+    conc_col, tot_col, _ = concentration(collected)
+    conc_open, tot_open, _ = concentration(outstanding)
+
+    today = date.today()
+    cur_ym = (today.year, today.month)
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    mtd = by_collected_month(collected).get(cur_ym, 0)
+
+    # Two windows on purpose. The run-rate reports what is happening now, current month
+    # included and labelled partial. The floor gate judges only months that have finished.
+    window = trailing_window(today)
+    per, avg, worst, worst_ym = collected_over(collected, window)
+    gate_window = completed_window(today)
+    gate_per, _, gate_worst, gate_worst_ym = collected_over(collected, gate_window)
+    estimated = [r["num"] for r in collected if r["month_basis"] == "issued"]
+
+    mtime = datetime.fromtimestamp(summary_path.stat().st_mtime)
+    now = datetime.now()
+
+    L = []
+    L.append("# MONEY - cash snapshot")
+    L.append("")
+    L.append("> GENERATED by scripts/money - do not hand-edit.")
+    L.append(f"> Generated: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    L.append(f"> Source: {summary_path.relative_to(ROOT) if summary_path.is_relative_to(ROOT) else summary_path} "
+             f"(mtime {mtime.strftime('%Y-%m-%d %H:%M:%S')})")
+    L.append("")
+
+    if not rows:
+        # Say plainly that the zero is structural. A reader who finds $0 in a cash file and
+        # cannot tell an empty register from a broken parser will either distrust every other
+        # figure here or read a drought that did not happen.
+        L.append("## Register is empty")
+        L.append("The register holds no invoice rows, so every figure below that depends on "
+                 "invoices is zero by construction, not because a month went badly. This is "
+                 "the expected state on a fresh clone and again between invoices.")
+        L.append("The table itself was read and is sound: heading, header row, required "
+                 "columns and separator all present. An unreadable register does not reach "
+                 "this file at all, it exits nonzero and writes nothing.")
+        if meta and meta.get("struck"):
+            L.append(f"NOTE: the table is not visually empty. {meta['struck']} row(s) are "
+                     f"struck through, which marks them voided or superseded, and the parser "
+                     f"skips those by design. That is why visible rows produced a zero.")
+        L.append("Fixed burn and the targets below are still real. Money leaves the account "
+                 "whether or not anything was billed.")
+        L.append("")
+
+    L.append("## Collected")
+    L.append(f"Total collected: ${col_total:,} ({len(collected)} invoice(s))")
+    for r in collected:
+        owner, _ = owner_of(r["bill_to"])
+        L.append(f"- {r['num']}  ${r['amount']:,}  {r['bill_to']} - owner: {owner}")
+    L.append("")
+
+    L.append("## Outstanding")
+    L.append(f"Total outstanding: ${out_total:,} ({len(outstanding)} invoice(s))")
+    if outstanding:
+        for r in outstanding:
+            owner, _ = owner_of(r["bill_to"])
+            L.append(f"- {r['num']}  ${r['amount']:,}  {r['bill_to']} - owner: {owner}")
+    else:
+        L.append("- (none open)")
+    L.append("")
+
+    L.append("## Trailing 3-month collected run-rate")
+    if not collected:
+        L.append("- no collected invoices to rate")
+    else:
+        L.append(f"Window: {month_label(window[0])} to {month_label(window[-1])} "
+                 f"(3 calendar months ending this month, bucketed by PAYMENT month)")
+        for ym in window:
+            tail = (f"  (month in progress, {today.day} of {days_in_month} days, PARTIAL)"
+                    if ym == cur_ym else "")
+            L.append(f"- {month_label(ym)}: ${per[ym]:,}{tail}")
+        L.append(f"Average: ${avg:,.0f}/mo (provisional: the last month in this window is "
+                 f"still running, so the average is diluted until it closes)")
+        L.append(f"Worst month in this window: {month_label(worst_ym)} at ${worst:,}. This "
+                 f"window ends on an unfinished month, so it is NOT the floor gate's window. "
+                 f"The gate judges completed months only, see the Cash floor gate section below.")
+        if estimated:
+            L.append(f"BASIS NOTE: {len(estimated)} collected invoice(s) carry no recorded "
+                     f"payment date and are bucketed by ISSUE month: "
+                     f"{', '.join(estimated)}. Grandfathered, all issued before the "
+                     f"{LEDGER_RESTART.isoformat()} payment-date cutover.")
+    L.append("")
+
+    L.append("## Cash floor gate (income leg only)")
+    if not collected:
+        L.append("- no collected invoices, gate not computable")
+    else:
+        judged = ", ".join(month_label(ym) for ym in gate_window)
+        L.append(f"Gate definition owner: {FLOOR_GATE_OWNER}")
+        L.append(f"Months judged: {judged} (the 3 most recent COMPLETED calendar months). "
+                 f"The running month is excluded: it holds $0 on the 1st by construction, so "
+                 f"judging it would flip the gate on the calendar instead of on the cash.")
+        for ym in gate_window:
+            L.append(f"- {month_label(ym)}: ${gate_per[ym]:,}")
+        L.append(f"Current month to date ({month_label(cur_ym)}): ${mtd:,}, not yet "
+                 f"evaluated ({today.day} of {days_in_month} days elapsed).")
+        L.append(f"Floor leg: worst of the months judged must be >= ${FLOOR_GATE_FLOOR:,} "
+                 f"collected. Worst month is {month_label(gate_worst_ym)} at ${gate_worst:,}.")
+        L.append(f"Floor leg: {'PASS' if gate_worst >= FLOOR_GATE_FLOOR else 'FAIL'} "
+                 f"(judged on {judged})")
+        if estimated:
+            L.append(f"BASIS CAVEAT: {len(estimated)} of the collected invoice(s) carry no "
+                     f"recorded payment date and are bucketed by ISSUE month (see BASIS NOTE "
+                     f"above), so the months judged here are partly estimated. Never quote "
+                     f"this PASS/FAIL without that basis.")
+        else:
+            L.append("BASIS CAVEAT: none. Every collected invoice carries a recorded payment "
+                     "date, so the months judged here are on actual cash dates.")
+        L.append("Cushion leg (cash banked): NOT COMPUTED. No cash-balance source exists in "
+                 "SUMMARY.md, same limitation as the buffer target below.")
+        L.append("The gate is the worst month, not the average. Do not read the average line "
+                 "as the gate.")
+    L.append("")
+
+    L.append("## Concentration by owner")
+    L.append("Combined (collected + open receivables):")
+    L.extend(fmt_conc(conc_all, tot_all) or ["- (none)"])
+    L.append("")
+    L.append("Collected only:")
+    L.extend(fmt_conc(conc_col, tot_col) or ["- (none)"])
+    L.append("")
+    L.append("Open receivables only (issued and unpaid). This is NOT the quoted pipeline:")
+    L.extend(fmt_conc(conc_open, tot_open) or ["- (none)"])
+    if unk_all:
+        L.append("")
+        L.append(f"NOTE: unmapped bill-to entit(ies) counted under their own name: "
+                 f"{', '.join(sorted(unk_all))}. Add to OWNER_ALIASES in scripts/money if same owner.")
+    L.append("")
+
+    burn = sum(c[1] for c in FIXED_COSTS)
+    L.append("## Monthly fixed burn")
+    for name, amt, cite in FIXED_COSTS:
+        L.append(f"- {name}: ${amt:,}/mo  ({cite})")
+    L.append(f"Total fixed burn: ${burn:,}/mo")
+    L.append("")
+
+    L.append("## Targets (REFERENCE, not computed)")
+    L.append(f"- Recurring target: ${TARGET_RECURRING:,}/mo recurring, >= 3 clients, none >~40%")
+    L.append(f"- Cash buffer target: ${TARGET_BUFFER:,} (6-month runway)")
+    L.append("NOTE: not computed, there is no cash-balance source in SUMMARY.md. These are "
+             "reference lines only; buffer/runway need a bank balance the register does not hold.")
+    L.append("")
+
+    return "\n".join(L) + "\n", col_total, out_total
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Generate MONEY.md from SUMMARY.md")
+    ap.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY,
+                    help="alternate register to parse (tests)")
+    ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
+                    help="alternate output path (tests)")
+    args = ap.parse_args()
+
+    summary_path = args.summary
+    if not summary_path.is_file():
+        die(f"summary not found: {summary_path}")
+    text = summary_path.read_text(encoding="utf-8", errors="replace")
+
+    rows, meta = parse_register(text)
+
+    # Open receivables must be on the clock. horizon reads Due tokens, so a due date living
+    # only in a Register column is invisible to it (the `horizon-blind` hazard in
+    # ai/ERRORS.md: money owed to you goes unchased exactly as easily as a promise you made
+    # goes unkept). This lives here, not in repo-doctor, because money is the single parser
+    # of the Register and a second copy of that parser would drift.
+    armed = armed_due_numbers(summary_path.parent)
+    unclocked = [r["num"] for r in rows if not r["paid"] and r["num"] not in armed]
+    if unclocked:
+        die("open receivable(s) with no armed Due line: " + ", ".join(unclocked) +
+            ". Add a line-start line of the form '**Due:** YYYY-MM-DD - <number> $<amount> "
+            "payment due from <client>. Confirm receipt or chase.' to that invoice's own "
+            f"record file in {summary_path.parent}/, then rerun. money looks ONLY in that "
+            "directory AND ONLY in the number's own record file (<number>.md), and the line "
+            "must name the number: a Due line armed in a client roadmap file, or in some "
+            "other invoice's record, satisfies horizon but not this check. horizon reads "
+            "line-start Due lines AND mid-line `**Due:**` tokens, and judges a "
+            "strikethrough per token, so the `~~old~~ new` rollover shape is live to "
+            "both; a due date in a table column is still invisible to the clock.")
+
+    report, col_total, out_total = build_report(rows, summary_path, meta)
+
+    # --- cross-check computed totals against the register's own Cash-status lines ---
+    # One number stated twice, by a human and by a parser: a mismatch means one of them is
+    # wrong and neither is trustworthy until a person looks. A stated line that is PRESENT is
+    # always cross-checked, empty register or not, because an emptied register under a cash
+    # line still claiming the old total is exactly the stale claim this duplication exists to
+    # catch. A stated line that is ABSENT is fatal only when rows exist. On an empty register
+    # there is no human total to disagree with, and an operator who cleared the register by
+    # deleting the section rather than zeroing it is in the correct state, not a broken one.
+    # Demanding the line there would re-lock the door this whole distinction just opened.
+    def cross_check(label, computed):
+        stated = register_stated(text, label)
+        if stated is None:
+            if rows:
+                die(f"no '**{label}: $N**' line in '## Cash status' to cross-check against")
+            return
+        if stated != computed:
+            die(f"{label.lower()} mismatch: computed ${computed:,} but register states "
+                f"${stated:,}, refusing to write wrong numbers")
+
+    cross_check("Collected", col_total)
+    cross_check("Outstanding", out_total)
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(report, encoding="utf-8")
+    empty_note = "" if rows else " (register is empty, this is a zeroed rollup)"
+    print(f"money: wrote {args.out} - collected ${col_total:,}, "
+          f"outstanding ${out_total:,}{empty_note}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

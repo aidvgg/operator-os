@@ -1,0 +1,50 @@
+{
+  "description": "Operator OS lifecycle hooks for Codex. Counterpart of the hooks block in .claude/settings.json; both invoke the same scripts under .claude/hooks/ so there is one owner per guard. Codex requires you to review and trust these interactively before they run, and re-trust after any edit to this file.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/repo-doctor\" 2>&1 || true",
+            "statusMessage": "repo-doctor",
+            "additionalContextLimit": 5000,
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/horizon\" --brief 2>&1 || true",
+            "statusMessage": "horizon",
+            "additionalContextLimit": 3000,
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/deny-env-access.py\"",
+            "timeout": 10,
+            "statusMessage": "env-file guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/deny-destructive-git.py\"",
+            "timeout": 10,
+            "statusMessage": "destructive-git guard"
+          }
+        ]
+      }
+    ]
+  }
+}

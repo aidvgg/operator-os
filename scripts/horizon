@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""horizon - the informational deadline clock for this operator OS.
+
+Usage:
+  scripts/horizon             full scan: CHRONIC + OVERDUE + NEXT 14 DAYS (ascending)
+  scripts/horizon --brief     top 3 dated items + one count line (SessionStart)
+  scripts/horizon --chronic   one line iff something is overdue CHRONIC_DAYS+ (repo-doctor)
+  scripts/horizon --root DIR  scan DIR instead of the git toplevel (tests)
+
+Sources (structured only - free-text date mining is an alarm swamp):
+  (a) `**Due:** YYYY-MM-DD - text` tokens across knowledge/ + outputs/ (skips raw/). A token
+      counts unless the strikethrough actually wraps THAT token, so the repo's own rollover
+      shape (strike the dead date, write the live one after it on the same line) stays
+      visible instead of vanishing with the line.
+  (b) `**Stale after:** YYYY-MM-DD` lines (doctor regex; a past date is OVERDUE)
+  (c) ai/DECISIONS.md 'Review on' column (markdown table; tolerated if missing). A date
+      creates a calendar review; an explicit `Gate: <condition>` creates a visible event
+      gate. Any other value, INCLUDING an empty one, is reported in a REVIEW-DATE PARSE
+      block, never silently dropped: the file's own rule is "no review date, no row", and a
+      swallowed row never nags.
+  (d) .backup-marker CONTENT - the date token backup-sensitive writes, plus its `hmac=`
+      and `restore=ok` integrity fields, parsed as WORD-BOUNDED fields. mtime is never the
+      primary signal: a stray touch must not reset a 21-day clock on the only recovery path
+      for wire, tax and client material. mtime survives only as a labelled last resort when
+      no date token parses.
+
+A date that is shaped right but not a real calendar date (2026-02-30) is named in a PARSE
+PROBLEMS block, never skipped: an unparseable commitment is still a commitment.
+
+Always exit 0 - horizon informs, never blocks. Never mutates anything. Every file read is
+guarded, so an unreadable input becomes a printed problem rather than a traceback.
+"""
+import re
+import subprocess
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
+HORIZON_DAYS = 14
+BACKUP_WARN_DAYS = 21
+# An item overdue this long is chronic: the date was set, passed, and moved nobody.
+# Threshold traces to the `clock-ignored` hazard in ai/ERRORS.md: a decision review sat a week
+# past its date while commits kept working its subject, and nothing said so.
+CHRONIC_DAYS = 7
+
+# TWO accepted Due shapes, and the asymmetry is deliberate, not stylistic. At LINE START the
+# loose form counts (list markers, blockquotes, bare `Due:`). PAST the line start only the OS's
+# own bold `**Due:**` marker counts, AND only when everything before it on the line is struck
+# text or list punctuation. That second clause is what keeps this out of the alarm swamp: most
+# mid-line `**Due:**` tokens in knowledge/ and outputs/ are QUOTATIONS of a Due line inside prose
+# or backticks, and docs that explain the convention quote it constantly. The narrow rule adds
+# nothing to the live scan while making the rollover shape
+# `~~**Due:** <old>~~ **Due:** <new>` visible, which a plain line-start anchor could not see
+# at all. The guardrail fixtures in knowledge/ops/os-roadmap.md hold the proof for that hole.
+# The Due/Stale grammar has ONE owner: scripts/clock_grammar.py. Loaded by path because the
+# consumers are extensionless executables, not an importable package. Three hand-copies of this
+# grammar used to exist and one edit widened exactly one of them, which is how money came to
+# reject the OS's own documented rollover shape while horizon accepted it.
+# The module is contractually side-effect free, so this load cannot exit the process.
+def _load_clock_grammar(script_dir):
+    import importlib.util
+    _p = Path(script_dir) / "clock_grammar.py"
+    if not _p.is_file():
+        return None, f"scripts/clock_grammar.py missing at {_p}"
+    try:
+        _spec = importlib.util.spec_from_file_location("clock_grammar", _p)
+        _m = importlib.util.module_from_spec(_spec)
+        _sys_dwb = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True          # never litter __pycache__ next to the scripts
+        try:
+            _spec.loader.exec_module(_m)
+        finally:
+            sys.dont_write_bytecode = _sys_dwb
+    except BaseException as e:                  # noqa: BLE001
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        return None, f"scripts/clock_grammar.py failed to load: {type(e).__name__}: {e}"
+    for _n in ("due_tokens", "struck_spans", "fenced_flags", "grammar_selfcheck"):
+        if not hasattr(_m, _n):
+            return None, f"scripts/clock_grammar.py is missing {_n}()"
+    return _m, None
+
+
+# The Due/Stale grammar lives in scripts/clock_grammar.py, its ONE owner. It used to be defined
+# here and hand-copied into scripts/money and scripts/repo-doctor; one edit taught this copy that
+# a strikethrough kills only the token it wraps and left the other two on the whole-line test, so
+# money rejected the rollover shape this file accepts. Re-exported below under the names this
+# file already used, so callers and the fixture suite see one definition.
+_CG, _CG_ERR = _load_clock_grammar(Path(__file__).resolve().parent)
+if _CG is None:
+    sys.stderr.write(f"horizon: FATAL {_CG_ERR}\n")
+    print(f"horizon: FATAL {_CG_ERR}. The clock cannot run on a guessed grammar.")
+    sys.exit(2)
+_bad = [lab for lab, ok in _CG.grammar_selfcheck() if not ok]
+if _bad:
+    sys.stderr.write("horizon: FATAL clock_grammar selfcheck failed: " + ", ".join(_bad) + "\n")
+    print("horizon: FATAL clock_grammar selfcheck failed: " + ", ".join(_bad))
+    sys.exit(2)
+DUE_ANY_RE = _CG.DUE_ANY_RE
+STALE_RE = _CG.STALE_RE
+STRIKE_RE = _CG.STRIKE_RE
+DASH_LEAD_RE = _CG.DASH_LEAD_RE
+struck_spans = _CG.struck_spans
+due_tokens = _CG.due_tokens
+fenced_flags = _CG.fenced_flags
+
+# .backup-marker integrity fields, WORD-BOUNDED on both sides. backup-sensitive writes
+# `<date> <name> md5=<32hex> hmac=<64hex> bytes=<n> members=<n> restore=ok`.
+# The substring test these replace (`"hmac=" not in body`) accepted `nothmac=garbage` and
+# `restore=okay` as proof, so a single forged marker line read as a fully verified backup and
+# horizon printed NOTHING about it. horizon cannot CHECK the MAC (no passphrase at session
+# start); its contract is shape plus freshness, and real integrity is enforced by
+# scripts/backup-sensitive at write time. Shape is therefore the only claim it may make, so
+# the shape test has to be exact.
+HMAC_RE = re.compile(r"(?<![0-9A-Za-z_=])hmac=([0-9a-fA-F]{64})(?![0-9A-Za-z_])")
+RESTORE_OK_RE = re.compile(r"(?<![0-9A-Za-z_=])restore=ok(?![0-9A-Za-z_])")
+
+
+def find_root() -> Path:
+    argv = sys.argv
+    for i, a in enumerate(argv):
+        if a == "--root" and i + 1 < len(argv):
+            return Path(argv[i + 1]).resolve()
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True).stdout.strip()
+    return Path(top).resolve() if top else Path(".").resolve()
+
+
+def scan_files(root: Path):
+    """(a) Due tokens and (b) Stale-after lines in knowledge/ + outputs/.
+
+    Returns (items, problems). A date of the right SHAPE that is not a real calendar date
+    (2026-02-30) used to be swallowed by a bare `continue`, so the one commitment whose date
+    can never arrive was the one the clock said nothing about. Same for a file this process
+    cannot read. Both are now returned as problems and printed.
+    """
+    items, problems = [], []
+    for base in ("knowledge", "outputs"):
+        d = root / base
+        if not d.is_dir():
+            continue
+        for p in sorted(d.rglob("*.md")):
+            if "raw" in p.parts:  # raw/ is quarantined
+                continue
+            try:
+                text = p.read_text(errors="ignore")
+            except OSError as e:
+                problems.append(f"{p.relative_to(root)} is unreadable ({e.__class__.__name__}), so any Due "
+                                f"line in it is invisible to the clock")
+                continue
+            rel = str(p.relative_to(root))
+            # A Due token inside a fenced block is a paste template or a spec example, never a
+            # promise. This has bitten: phantom commitments copied out of template blocks sat
+            # live in this aggregate, one of them a restore drill already completed, and they
+            # would have begun reporting clock-chronic on every commit. An unclosed fence is
+            # REPORTED, not swallowed: failing open there would drop every token after a stray
+            # backtick line, which is the silent-drop class this function was rewritten to end.
+            _lines = text.splitlines()
+            _fenced, _odd = fenced_flags(_lines)
+            if _odd:
+                problems.append(f"{rel} has an unclosed ``` fence, so Due tokens after it "
+                                f"cannot be told from paste templates; tokens outside the "
+                                f"first fence were still read")
+            for n, line in enumerate(_lines, 1):
+                if _fenced[n - 1]:
+                    continue
+                found = False
+                for raw, desc in due_tokens(line):
+                    found = True
+                    try:
+                        d0 = date.fromisoformat(raw)
+                    except ValueError:
+                        problems.append(f"{rel}:{n} Due date {raw!r} is not a real calendar "
+                                        f"date, so this commitment has no clock")
+                        continue
+                    items.append((d0, rel, desc or "(no description)"))
+                if found:
+                    continue
+                sm = STALE_RE.match(line)
+                if sm:
+                    try:
+                        d0 = date.fromisoformat(sm.group(1))
+                    except ValueError:
+                        problems.append(f"{rel}:{n} Stale after date {sm.group(1)!r} is not a "
+                                        f"real calendar date, so this page never expires")
+                        continue
+                    items.append((d0, rel, "stale after this date - re-verify or supersede"))
+    return items, problems
+
+
+def scan_decisions(root: Path):
+    """(c) The 'Review on' column of ai/DECISIONS.md, if present.
+
+    Returns (items, gates, unparsed, problems). A `Gate: <condition>` cell is a valid
+    event-triggered review. It stays visible in an EVENT GATES block, but has no invented
+    calendar date. Any other non-date cell is returned as unparsed and printed, not swallowed:
+    a row that is dropped silently disables the file's own forcing function on exactly the
+    rows that can never fire. An EMPTY cell is reported too: it is the same broken row with
+    less to read, and reporting only the non-empty ones meant the emptiest violation of "no
+    review date, no row" was the invisible one.
+
+    The read is guarded. The module docstring promises exit 0, and an unreadable
+    ai/DECISIONS.md (mode 000, a bad mount) used to raise straight through main().
+    """
+    items, gates, unparsed, problems = [], [], [], []
+    f = root / "ai" / "DECISIONS.md"
+    if not f.is_file():
+        return items, gates, unparsed, problems
+    try:
+        body = f.read_text(errors="ignore")
+    except OSError as e:
+        problems.append(f"ai/DECISIONS.md is unreadable ({e.__class__.__name__}), so no "
+                        f"decision review can be nagged")
+        return items, gates, unparsed, problems
+    review_idx = None
+    outcome_idx = None
+    for line in body.splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        low = [c.lower() for c in cells]
+        if review_idx is None:
+            for i, c in enumerate(low):
+                if "review on" in c:
+                    review_idx = i
+                elif "outcome" in c:
+                    outcome_idx = i
+            continue
+        if all(set(c) <= set("-: ") for c in cells):  # header separator row
+            continue
+        # review is done once Outcome opens with a verdict mark; hourglass/blank keeps nagging
+        if outcome_idx is not None and outcome_idx < len(cells) \
+                and cells[outcome_idx].startswith(("✅", "❌")):
+            continue
+        if review_idx < len(cells):
+            cell = cells[review_idx]
+            desc = cells[1] if len(cells) > 1 and cells[1] else "decision review"
+            m = re.search(r"\d{4}-\d{2}-\d{2}", cell)
+            if not m:
+                gate = re.fullmatch(r"(?i:gate:\s*(.+))", cell)
+                if gate:
+                    gates.append((desc, gate.group(1)))
+                else:
+                    unparsed.append((desc, cell))
+                continue
+            try:
+                d0 = date.fromisoformat(m.group(0))
+            except ValueError:
+                unparsed.append((desc, cell))
+                continue
+            items.append((d0, "ai/DECISIONS.md", "review: " + desc))
+    return items, gates, unparsed, problems
+
+
+def backup_line(root: Path, today: date):
+    """Freshness from the marker's CONTENT, not its mtime.
+
+    backup-sensitive writes the verified date as the marker's first token, and appends
+    `hmac=<64 hex>` + `restore=ok` once the archive has been MACed and proven to decrypt. A
+    marker without those exact fields predates authenticated integrity, so its "verified"
+    claim only ever covered transport. Traces to ai/ERRORS.md Hazards `backup-unproven`.
+
+    What this function may and may not claim. It runs at SessionStart with no passphrase, so
+    it cannot recompute the MAC: its contract is SHAPE plus FRESHNESS, and cryptographic
+    integrity is enforced by scripts/backup-sensitive at write time, which refuses to write
+    the marker at all until the archive has decrypted and listed. Shape being the only claim
+    is exactly why the shape test is exact rather than a substring: the line
+    `2099-01-01 nothmac=garbage restore=okay` satisfied every old test at once (a substring
+    `hmac=`, a substring `restore=ok`, and a NEGATIVE age that slipped under the
+    `age > BACKUP_WARN_DAYS` bar), so horizon printed nothing and silence reads as verified.
+    A future-dated stamp is now the loudest branch here, not the quietest.
+
+    Every string returned here uses ' - ' as its separator: run_brief splits on that token
+    to build the tail of its count line, so a message without it degrades to the literal
+    'backup unverified'. Each tail is therefore written to carry the finding, not just the
+    imperative.
+    """
+    marker = root / ".backup-marker"
+    if not marker.exists():
+        return "backup: .backup-marker absent - no verified backup recorded yet"
+    try:
+        body = marker.read_text(errors="ignore")
+    except OSError:
+        return "backup: .backup-marker unreadable - run backup-sensitive"
+    parts = body.split()
+    stamp = None
+    if parts:
+        try:
+            stamp = date.fromisoformat(parts[0])
+        except ValueError:
+            stamp = None
+    if stamp is None:
+        # Last resort only, and labelled as such so the fallback can never look authoritative.
+        try:
+            mage = (today - date.fromtimestamp(marker.stat().st_mtime)).days
+        except OSError:
+            return "backup: .backup-marker carries no date token - run backup-sensitive"
+        return (f"backup: .backup-marker carries no date token, mtime says {mage}d "
+                f"- re-run backup-sensitive")
+    age = (today - stamp).days
+    if age < 0:
+        return (f"backup: .backup-marker is stamped {stamp.isoformat()}, {-age} day(s) in the "
+                f"FUTURE, so its freshness claim proves nothing - marker forged or the clock "
+                f"is wrong, re-run backup-sensitive")
+    missing = []
+    if not HMAC_RE.search(body):
+        missing.append("a word-bounded hmac=<64 hex>")
+    if not RESTORE_OK_RE.search(body):
+        missing.append("restore=ok")
+    if missing:
+        return (f"backup: last marker ({age}d old) is missing {' and '.join(missing)}, so it "
+                f"predates authenticated integrity and the restore test - unproven backup, "
+                f"run backup-sensitive")
+    if age > BACKUP_WARN_DAYS:
+        return (f"backup: last verified backup {age} days ago (>{BACKUP_WARN_DAYS}d) "
+                f"- run backup-sensitive")
+    return None
+
+
+def fmt(item, today=None) -> str:
+    d0, src, txt = item
+    if len(txt) > 90:
+        txt = txt[:87] + "..."
+    age = f" +{(today - d0).days}d" if today is not None and d0 < today else ""
+    return f"  {d0.isoformat()}{age}  {src}  {txt}"
+
+
+def run_full(items, today, bkline, gates, unparsed, problems):
+    horizon = today + timedelta(days=HORIZON_DAYS)
+    overdue = sorted(i for i in items if i[0] < today)
+    upcoming = sorted(i for i in items if today <= i[0] <= horizon)
+    chronic = [i for i in overdue if (today - i[0]).days >= CHRONIC_DAYS]
+    print(f"horizon - {today.isoformat()} (next {HORIZON_DAYS} days)")
+    if chronic:
+        print(f"\n!! CHRONIC ({len(chronic)}) - overdue {CHRONIC_DAYS}+ days.")
+        print("   Resolve it or re-date it with a reason. A date nobody moves is not a commitment.")
+        for i in chronic:
+            print(fmt(i, today))
+    print(f"\nOVERDUE ({len(overdue)})")
+    for i in overdue:
+        print(fmt(i, today))
+    if not overdue:
+        print("  none")
+    print(f"\nNEXT 14 DAYS ({len(upcoming)})")
+    for i in upcoming:
+        print(fmt(i))
+    if not upcoming:
+        print("  none")
+    if gates:
+        print(f"\nEVENT GATES ({len(gates)})")
+        for desc, condition in gates:
+            d = desc if len(desc) <= 70 else desc[:67] + "..."
+            c = condition if len(condition) <= 90 else condition[:87] + "..."
+            print(f'  ai/DECISIONS.md  "{d}"  Gate = {c}')
+    if unparsed:
+        print(f"\nREVIEW-DATE PARSE ({len(unparsed)})")
+        for desc, cell in unparsed:
+            d = desc if len(desc) <= 70 else desc[:67] + "..."
+            shown = repr(cell) if cell else "EMPTY"
+            print(f"  ai/DECISIONS.md  \"{d}\"  Review on = {shown}, not a date, "
+                  f"so this row can never nag")
+    if problems:
+        print(f"\nPARSE PROBLEMS ({len(problems)})")
+        print("   A date that cannot be parsed is a commitment with no clock. Fix the value.")
+        for pr in problems:
+            print(f"  {pr}")
+    if bkline:
+        print("\n" + bkline)
+
+
+def run_brief(items, today, bkline, gates, unparsed, problems):
+    horizon = today + timedelta(days=HORIZON_DAYS)
+    overdue = sorted(i for i in items if i[0] < today)
+    upcoming = sorted(i for i in items if today <= i[0] <= horizon)
+    for d0, src, txt in (overdue + upcoming)[:3]:
+        mark = f"OVERDUE +{(today - d0).days}d" if d0 < today else d0.isoformat()
+        if len(txt) > 60:
+            txt = txt[:57] + "..."
+        print(f"horizon  {mark}  {src}  {txt}")
+    count = f"horizon: {len(overdue)} overdue, {len(upcoming)} in next {HORIZON_DAYS}d"
+    if overdue:
+        count += f" (worst +{(today - overdue[0][0]).days}d)"
+    if gates:
+        count += f", {len(gates)} DECISIONS event gate(s)"
+    if unparsed:
+        count += f", {len(unparsed)} DECISIONS row(s) with a non-date Review on"
+    if problems:
+        count += f", {len(problems)} unparseable date(s) or unreadable file(s)"
+    if bkline:
+        count += "; " + (bkline.split(" - ")[-1].strip() if " - " in bkline
+                         else "backup unverified")
+    print(count)
+
+
+def run_chronic(items, today):
+    """One machine-readable line iff something is chronically overdue.
+
+    repo-doctor shells out to this and appends the line to its soft list, which is how a
+    date nobody moves reaches the pre-commit surface. Keep the `clock-chronic:` prefix
+    stable - it is the check id.
+    """
+    overdue = sorted(i for i in items if i[0] < today)
+    chronic = [i for i in overdue if (today - i[0]).days >= CHRONIC_DAYS]
+    if not chronic:
+        return
+    d0, src, txt = chronic[0]
+    print(f"clock-chronic: {len(chronic)} commitment(s) overdue {CHRONIC_DAYS}+ days; "
+          f"worst +{(today - d0).days}d {src} - {txt[:60]}")
+
+
+def main() -> int:
+    root = find_root()
+    today = date.today()
+    dec_items, gates, unparsed, dec_problems = scan_decisions(root)
+    file_items, file_problems = scan_files(root)
+    items = file_items + dec_items
+    problems = file_problems + dec_problems
+    bkline = backup_line(root, today)
+    if "--chronic" in sys.argv:
+        run_chronic(items, today)
+    elif "--brief" in sys.argv:
+        run_brief(items, today, bkline, gates, unparsed, problems)
+    else:
+        run_full(items, today, bkline, gates, unparsed, problems)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

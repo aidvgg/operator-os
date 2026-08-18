@@ -1,0 +1,85 @@
+{
+  "clientName": "Acme Retail",
+  "projectTitle": "Inventory-Sync Phase 3: Ops Dashboard",
+  "projectDescription": "Live stock view, exception queue and per-location drilldown on top of the Phase 2 sync",
+  "date": "1 Aug 2026",
+  "sentBy": "Sam Rivera",
+  "contactEmail": "sam@northwindlabs.example",
+  "proposalType": "Project Proposal",
+
+  "overview": "Phase 2 put a nightly two-way sync between the point-of-sale and the warehouse system, with a reconciliation report and alerting on failed runs. The sync is running and the weekly by-hand reconciliation is gone. What is left is visibility: the data is correct now, but reading it still means opening two systems and a report attachment.",
+  "overviewExtra": "Phase 3 is the read layer. One place that answers what is in stock right now, which lines disagreed and need a human, and how each location is tracking. No new integrations, no changes to the sync itself.",
+
+  "scopeSections": [
+    {
+      "title": "Live stock view",
+      "services": [
+        { "service": "Current position", "description": "On-hand by SKU across all three locations, sourced from the Phase 2 sync, refreshed on each run." },
+        { "service": "Search and filter", "description": "By SKU, description, location and stock band, so a question about one line takes seconds rather than an export." }
+      ]
+    },
+    {
+      "title": "Exception queue",
+      "services": [
+        { "service": "Disagreement list", "description": "Every line where the two systems did not reconcile on the last run, oldest first, with both values shown side by side." },
+        { "service": "Resolve and annotate", "description": "Mark a line resolved with a short note. The note stays on the line so the next person sees why it was closed." },
+        { "service": "Ageing", "description": "A line unresolved past a threshold is surfaced at the top. Exceptions that nobody looks at are the failure mode this is built against." }
+      ]
+    },
+    {
+      "title": "Per-location drilldown",
+      "services": [
+        { "service": "Location view", "description": "The same stock and exception views scoped to one store, for the people who only run one." },
+        { "service": "Trend", "description": "Exception count and unreconciled value per location over time, so a store that is drifting shows up before it becomes a stock-out." }
+      ]
+    }
+  ],
+
+  "investment": {
+    "lineItems": [
+      { "description": "Phase 3: Ops dashboard, build and handover", "amount": "$9,000", "bold": true }
+    ],
+    "note": "All amounts are in US Dollars. Phases 1 and 2 are complete and invoiced separately."
+  },
+
+  "whatThisCovers": [
+    "Build, test and deploy of the three views described above.",
+    "Access for named users, with the roles you already use in the warehouse system.",
+    "A handover session and a written runbook covering the exception workflow.",
+    "Two weeks of post-handover support for defects in what was delivered."
+  ],
+
+  "additionalWork": "Anything outside the three views above is quoted separately before it is started. That includes new integrations, changes to the Phase 2 sync logic, historical backfill beyond what the sync already holds, and any reporting that leaves the dashboard, for example scheduled email or a data export feed.",
+
+  "paymentTerms": [
+    { "text": "Due at kick-off", "amount": "$4,500" },
+    { "text": "Due on handover", "amount": "$4,500" }
+  ],
+
+  "termsAndConditions": [
+    "Fixed price. The price does not move unless the scope above changes, and a scope change is agreed in writing before any work on it starts.",
+    "Timelines are confirmed at kick-off, once access to the reporting environment is in place.",
+    "Access required: read access to the Phase 2 sync database and to the warehouse system's user roles.",
+    "Work delivered under this proposal is owned by Acme Retail on final payment."
+  ],
+
+  "customSections": [
+    {
+      "heading": "DEFINITION OF DONE",
+      "content": [
+        "The live stock view shows the same on-hand figure as the warehouse system for a sampled set of 50 SKUs across all three locations.",
+        "Every line that failed to reconcile on the most recent sync run appears in the exception queue, and a resolved line leaves the queue with its note attached.",
+        "A named user at a single location can reach their own store's view and cannot see another store's drilldown.",
+        "The runbook has been walked through once with the ops lead, on the live system, without Sam driving."
+      ]
+    }
+  ],
+
+  "scopeTrace": [
+    { "line": "Live stock view", "origin": "asked by client 2026-07-30", "evidence": "knowledge/ops/logbook/days/2026-07-30.md, section 'Shipped': 'Phase 3 scoping call held, 50 minutes'" },
+    { "line": "Exception queue", "origin": "asked by client 2026-07-30", "evidence": "knowledge/ops/logbook/days/2026-07-30.md, section 'Shipped': 'The ops lead wants the exception queue before the drilldown'" },
+    { "line": "Per-location drilldown", "origin": "asked by client 2026-07-30, extended by Sam", "evidence": "client ask in knowledge/ops/logbook/days/2026-07-30.md, section 'Shipped': 'the people who would use a drilldown'. The per-location exception trend on top of it has no client ask and was added by Sam" },
+    { "line": "Nightly two-way sync", "origin": "already live, not billable", "evidence": "knowledge/clients/acme-retail/roadmap.md, section '2026-07-18 - Phase 2 delivered and signed off': 'The sequential nightly job, directions A then B'" },
+    { "line": "Run alerting", "origin": "already live, not billable", "evidence": "knowledge/clients/acme-retail/roadmap.md, section '2026-07-18 - Phase 2 delivered and signed off': 'Alerting on failure and on variance, to both channels'" }
+  ]
+}

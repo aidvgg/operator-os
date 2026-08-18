@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""docx-check - the canonical real-app open test for generated .docx files.
+
+Usage:
+  scripts/docx-check <file.docx> [<file.docx> ...]
+  scripts/docx-check --selftest        prove the checker still rejects a known-bad package
+
+Every other "verify the .docx" instruction in this repo points here. String-grep
+and `unzip -l` cannot catch a malformed <w:document> root: a corrupt .docx can pass
+regex text extraction and still fail on open, which is exactly how a broken file
+reaches a client (the class is on the ledger, ai/ERRORS.md). This runs the checks
+that something which is not the generator must pass before delivery.
+
+Per .docx, in order (first failure wins):
+  1. zip      - zipfile.testzip() integrity (real zip, no corrupt members)
+  2. xml      - xml.etree parses EVERY .xml member
+  3. rels     - every .rels Target and every [Content_Types].xml Override resolves to a
+                part that exists in the package, and every part has a Default or Override
+  4. root     - word/document.xml root local-name == 'document' with a <body> child
+  5. text     - extracted visible text (all w:t elements) is non-empty
+  6. textutil - (darwin only) `textutil -convert txt` yields non-empty output;
+                on other platforms the stage is skipped and PASS is annotated
+                `(textutil stage skipped: macOS-only)`, so a Linux pass is never
+                mistaken for a six-stage pass
+
+`scripts/docx-check --selftest` builds three packages under /private/tmp: a good one, one
+with a dangling image relationship, and one whose word/_rels/document.xml.rels is truncated
+XML. It asserts the checker accepts the first and rejects both others at [rels] with a
+reason line, never with a traceback.
+
+Prints `PASS <file>` or `FAIL <file> [<stage>]: <reason>` per file.
+Exit 1 if any file FAILs (or any argv path is unusable), 0 otherwise.
+"""
+import os
+import posixpath
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def check(path):
+    """Return (ok, stage, reason). stage/reason meaningful only when not ok."""
+    if not os.path.isfile(path):
+        return False, "open", "not a file"
+    if not zipfile.is_zipfile(path):
+        return False, "zip", "not a zip (a text file with a .docx name?)"
+
+    # Stage 1: zip integrity.
+    try:
+        with zipfile.ZipFile(path) as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return False, "zip", f"corrupt zip member: {bad}"
+            names = set(zf.namelist())
+            if "word/document.xml" not in names:
+                return False, "zip", "missing word/document.xml"
+
+            # Stage 2: parse EVERY .xml member.
+            for name in names:
+                if not name.lower().endswith(".xml"):
+                    continue
+                try:
+                    ET.fromstring(zf.read(name))
+                except ET.ParseError as e:
+                    return False, "xml", f"{name} is not well-formed XML: {e}"
+
+            # Stage 3: package relationship graph. Every .rels target and every
+            # [Content_Types].xml Override must resolve to a part that exists in the zip.
+            # A dangling image/hyperlink/style relationship is well-formed XML and extracts
+            # text fine, so zip + xml + root + text + textutil ALL pass it while Word shows a
+            # broken image or a repair prompt. Verified against a synthetic dangling-image
+            # docx: PASS under the old five stages, exit 0.
+            # Traces to the ledger class in ai/ERRORS.md: a corrupt .docx was delivered by a
+            # verification step that could not see the defect class it was built for.
+            # Stage 2 parses only members ending in `.xml`, which excludes `_rels/.rels`,
+            # `word/_rels/document.xml.rels` and any other `.rels` part. Those are parsed
+            # here, so a malformed one must FAIL [rels] with a reason rather than raise an
+            # uncaught ParseError: a traceback is not the documented contract the pre-send
+            # checklist relies on, and a crash reads as "the tool is broken", not "the file
+            # is broken". Same guard on [Content_Types].xml, whose name ends in `.xml` and
+            # so is already well-formedness-checked, but which must not be the one parse in
+            # this stage that can escape.
+            if "[Content_Types].xml" not in names:
+                return False, "rels", "missing [Content_Types].xml"
+            try:
+                ct = ET.fromstring(zf.read("[Content_Types].xml"))
+            except ET.ParseError as e:
+                return False, "rels", f"[Content_Types].xml is not well-formed XML: {e}"
+            defaults = {c.get("Extension", "").lower() for c in ct
+                        if local_name(c.tag) == "Default"}
+            overrides = {c.get("PartName", "").lstrip("/") for c in ct
+                         if local_name(c.tag) == "Override"}
+            for pn in sorted(overrides):
+                if pn not in names:
+                    return False, "rels", (
+                        f"[Content_Types].xml declares {pn}, which is not in the package")
+            for n in sorted(names):
+                if n.endswith("/") or n == "[Content_Types].xml":
+                    continue
+                ext = n.rsplit(".", 1)[-1].lower() if "." in n else ""
+                if n not in overrides and ext not in defaults:
+                    return False, "rels", (
+                        f"part {n} has no [Content_Types].xml Default or Override")
+            for n in sorted(names):
+                if not n.endswith(".rels"):
+                    continue
+                base = posixpath.dirname(posixpath.dirname(n))
+                try:
+                    rels_root = ET.fromstring(zf.read(n))
+                except ET.ParseError as e:
+                    return False, "rels", f"{n} is not well-formed XML: {e}"
+                for rel in rels_root:
+                    if rel.get("TargetMode") == "External":
+                        continue
+                    target = rel.get("Target", "")
+                    if not target or target.startswith("#") or "://" in target:
+                        continue
+                    resolved = posixpath.normpath(posixpath.join(base, target)).lstrip("/")
+                    if resolved not in names:
+                        return False, "rels", (
+                            f"{n} relationship {rel.get('Id', '?')} targets {target}, "
+                            f"resolved to {resolved}, which is not in the package")
+
+            # Stage 4: document root shape.
+            root = ET.fromstring(zf.read("word/document.xml"))
+            if local_name(root.tag) != "document":
+                return False, "root", (
+                    f"word/document.xml root is <{local_name(root.tag)}>, "
+                    "expected <document>")
+            if not any(local_name(c.tag) == "body" for c in root):
+                return False, "root", "word/document.xml has no <body> child"
+
+            # Stage 5: non-empty visible text (all w:t elements).
+            texts = [
+                (el.text or "")
+                for el in root.iter(f"{{{W_NS}}}t")
+            ]
+            if not "".join(texts).strip():
+                return False, "text", "no visible text (all w:t elements empty)"
+    except zipfile.BadZipFile as e:
+        return False, "zip", f"bad zip: {e}"
+
+    # Stage 6: darwin real-app open test via textutil.
+    if sys.platform == "darwin":
+        with tempfile.NamedTemporaryFile(
+                suffix=".txt", dir="/private/tmp", delete=False) as tf:
+            out_path = tf.name
+        try:
+            proc = subprocess.run(
+                ["textutil", "-convert", "txt", path, "-output", out_path],
+                capture_output=True, text=True)
+            if proc.returncode != 0:
+                return False, "textutil", (
+                    "textutil could not open the file: "
+                    + (proc.stderr.strip() or f"exit {proc.returncode}"))
+            try:
+                with open(out_path, "r", errors="replace") as fh:
+                    body = fh.read()
+            except OSError:
+                return False, "textutil", "textutil produced no output file"
+            if not body.strip():
+                return False, "textutil", "textutil output was empty"
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+    return True, "", ""
+
+
+_ST_CT = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package'
+          '.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+          '<Default Extension="png" ContentType="image/png"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.'
+          'openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+_ST_RELS = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+            'relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats'
+            '.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="word/document.xml"/></Relationships>')
+_ST_DRELS = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+             'relationships"><Relationship Id="rId9" Type="http://schemas.openxmlformats'
+             '.org/officeDocument/2006/relationships/image" '
+             'Target="media/logo.png"/></Relationships>')
+_ST_DOC = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006'
+           '/main"><w:body><w:p><w:r><w:t>docx-check selftest</w:t></w:r></w:p>'
+           '</w:body></w:document>')
+# Truncated mid-element: a `.rels` part that stage 2 never sees (it does not end in `.xml`)
+# and that stage 3 used to hand straight to ET.fromstring, raising an uncaught ParseError.
+_ST_BADRELS = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+               '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+               'relationships"><Relationship Id="rId9" Target="media/logo.png"')
+
+
+def selftest():
+    """Guardrail fixture: prove the checker still flags a known-bad package.
+
+    A check with no test rots silently while every run stays green; ai/ERRORS.md carries
+    guardrail rot as a standing hazard. Writes ONLY under /private/tmp, never into the
+    repo, because an audit probe that fixtures inside the tree eventually clobbers a live
+    file.
+    """
+    d = tempfile.mkdtemp(prefix="docx-check-selftest-", dir="/private/tmp")
+    good = os.path.join(d, "good.docx")
+    bad = os.path.join(d, "dangling-image.docx")
+    malformed = os.path.join(d, "malformed-rels.docx")
+    for path, drels in ((good, None), (bad, _ST_DRELS), (malformed, _ST_BADRELS)):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _ST_CT)
+            z.writestr("_rels/.rels", _ST_RELS)
+            z.writestr("word/document.xml", _ST_DOC)
+            if drels is not None:
+                z.writestr("word/_rels/document.xml.rels", drels)
+    failures = []
+    ok, stage, reason = check(good)
+    if not ok:
+        failures.append(f"positive fixture should PASS but failed [{stage}]: {reason}")
+    for label, path in (("dangling-image", bad), ("malformed-rels", malformed)):
+        # A raised ParseError here is itself the regression: check() must return a verdict,
+        # never propagate. Catch it so the selftest reports it instead of crashing too.
+        try:
+            ok, stage, reason = check(path)
+        except Exception as e:  # noqa: BLE001 - a crash is the failure being tested for
+            failures.append(f"{label} fixture raised {type(e).__name__} instead of "
+                            f"returning FAIL [rels]: {e}")
+            continue
+        if ok:
+            failures.append(f"{label} fixture should FAIL but PASSED")
+        elif stage != "rels":
+            failures.append(f"{label} fixture failed at [{stage}], expected [rels]")
+        elif not reason.strip():
+            failures.append(f"{label} fixture failed at [rels] with an empty reason")
+    for f in failures:
+        print(f"SELFTEST FAIL: {f}")
+    if not failures:
+        print("SELFTEST PASS: valid package accepted, dangling image relationship rejected, "
+              "malformed .rels rejected at [rels] rather than crashing")
+    return 1 if failures else 0
+
+
+TEXTUTIL_SKIP_NOTE = "textutil stage skipped: macOS-only"
+
+
+def main(argv):
+    if "--selftest" in argv:
+        return selftest()
+    if "--help" in argv or "-h" in argv:
+        print((__doc__ or "").strip())
+        return 0
+    paths = argv[1:]
+    if not paths:
+        print("usage: docx-check <file.docx> [<file.docx> ...] | --selftest | --help", file=sys.stderr)
+        return 2
+    failed = False
+    for path in paths:
+        ok, stage, reason = check(path)
+        if ok:
+            note = "" if sys.platform == "darwin" else f"  ({TEXTUTIL_SKIP_NOTE})"
+            print(f"PASS {path}{note}")
+        else:
+            failed = True
+            print(f"FAIL {path} [{stage}]: {reason}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,2222 @@
+#!/usr/bin/env python3
+"""repo-doctor - non-mutating hygiene checker for this Operator OS repo.
+
+Usage:
+  scripts/repo-doctor              full scan (tracked files + worktree soft checks)
+  scripts/repo-doctor --staged     pre-commit mode (staged set; HARD checks plus a few soft
+                                   lines that inform without blocking)
+  scripts/repo-doctor --print-protected  print derived PROTECTED prefixes + names, exit 0
+
+Exit 1 on any HARD violation, 0 otherwise. Exit 2 = the scan itself broke (a git call
+failed); nothing was verified, so 2 must never be read as "clean". Never rewrites anything.
+Exceptions: .repo-doctor-allow, one per line:
+  <check-id> <path-glob>[::<token-glob>] reason=<text> expires=YYYY-MM-DD   (max 90 days out)
+check-id matches exactly; the optional ::<token-glob> scopes an entry to one finding inside
+a file rather than the whole file. Expired entries are themselves HARD violations.
+
+Two hooks, two jobs. `.githooks/pre-commit` runs --staged (fast, staged set only).
+`.githooks/pre-push` materializes each COMMIT being pushed in a throwaway worktree and runs
+the FULL scan there, because staged mode structurally cannot re-examine a file that was
+committed once with `git commit --no-verify` and never staged again, and the worktree on
+disk is not what a push transfers. So --no-verify defers the block to push time, not to
+"the next commit". Pair it with a .repo-doctor-allow entry or the push fails.
+"""
+import fnmatch
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+from datetime import date, timedelta
+from pathlib import Path, PurePosixPath
+
+
+def _die(msg: str):
+    """Fail closed, loudly, exit 2. Never return.
+
+    A checker that cannot read its own inputs must never look clean. A swallowed
+    `git ls-files` / `git diff --cached` failure yields an EMPTY file list, so every
+    per-file check silently scans nothing and the run prints "clean", which is the
+    guardrail-rot hazard in ai/ERRORS.md (a gate that is reached and then does nothing,
+    leaving the run green) wearing a new costume. Exit 2 keeps it distinct from 1 (real HARD
+    violations) so a hook or a caller can tell "the checker broke" from "the tree is dirty".
+    """
+    sys.stderr.write(f"FATAL repo-doctor: {msg}\n")
+    print(f"FATAL repo-doctor: {msg}. Scan ABORTED, nothing was verified")
+    sys.exit(2)
+
+
+_root_r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+if _root_r.returncode != 0 or not _root_r.stdout.strip():
+    _die(f"`git rev-parse --show-toplevel` exited {_root_r.returncode} "
+         f"({_root_r.stderr.strip()[:120]}), not inside a git work tree")
+ROOT = Path(_root_r.stdout.strip())
+STAGED = "--staged" in sys.argv
+
+# THREE ROOTS, because a push-time scan judges one tree with another tree's rules.
+#   scan_root    = ROOT, the tree being judged. In a pre-push run this is a detached worktree
+#                  holding one pushed commit; its BYTES are the subject.
+#   rules_root   = LIVE_ROOT, the pushing checkout. The doctor binary, .repo-doctor-allow and
+#                  .gitignore policy come from here, because an exception must be CURRENT to be
+#                  an exception. Reading them from the scanned commit meant a commit that
+#                  weakened the doctor self-approved forever, and an allow entry that had since
+#                  expired wedged the push with no amendable target.
+#   machine_root = LIVE_ROOT too, for checks whose subject is this MACHINE and not any commit:
+#                  raw/ (outputs-raw-dup), PAYMENT-DETAILS.md, money-drift, sessionstart-mute.
+#                  Those inputs are gitignored or worktree-state based, so they are structurally absent
+#                  from a detached worktree and fired as guaranteed false positives once per
+#                  scanned commit, costing the soft tier its signal.
+# Deliberately NOT repointed: ai/TOMBSTONES.md. A commit made before a value was retired was
+# legitimately clean when made, and the ripple obligation belongs to the session that retired
+# the value. A rule-ledger is as-of-then; an exception must be as-of-now. That asymmetry is the
+# whole design and is argued in a row of ai/DECISIONS.md.
+LIVE_ROOT = ROOT
+HISTORY_SCAN = False
+for _a in sys.argv[1:]:
+    if _a.startswith("--live-root="):
+        _lr = Path(_a.split("=", 1)[1])
+        if not (_lr / "scripts" / "repo-doctor").is_file():
+            _die(f"--live-root={_lr} does not hold scripts/repo-doctor, refusing to scan with "
+                 f"rules from a tree that is not a checkout of this repo")
+        LIVE_ROOT, HISTORY_SCAN = _lr, True
+ALLOW_FILE = LIVE_ROOT / ".repo-doctor-allow"
+SETTINGS_JSON = ".claude/settings.json"
+AGENT_ROUTES = "ai/AGENT_ROUTES.json"
+AGENT_SYNC_PATH = "scripts/sync-agent-adapters"
+AGENT_SYNC = LIVE_ROOT / AGENT_SYNC_PATH
+# The sentinel pins the SHAPE, not the count: an operator adds a skill row to the
+# registry, the generator renders one more adapter, and the count moves. Pinning it
+# here would make every legitimate skill addition a doctor edit. Dropped surfaces
+# are still caught: the generator's own --check diffs each expected surface, and the
+# negative probe below proves it rejects a stale one.
+AGENT_SUCCESS = re.compile(r"^agent-adapters: clean \([1-9]\d* generated surfaces\)$")
+AGENT_DOCTOR_MARKER = 'AGENT_ROUTES = "ai/AGENT_ROUTES.json"'
+AGENT_GENERATED_HEADER = "GENERATED by scripts/sync-agent-adapters from ai/AGENT_ROUTES.json"
+AGENT_DISCOVERY_PATHS = (
+    "AGENTS.md",
+    "GEMINI.md",
+    ".github/copilot-instructions.md",
+    ".agents/skills/daily-log/SKILL.md",
+    ".claude/skills/daily-log/SKILL.md",
+    ".claude/commands/standup.md",
+    ".claude/commands/eod.md",
+)
+AGENT_CONVERTED_PATHS = (".claude/commands/weekly.md",)
+
+# Paths that must never be tracked or staged (mirrors .gitignore; catches -f adds
+# and ignore-rule regressions). Derived from the repo-root .gitignore at runtime, then
+# UNIONed with a hardcoded floor so a botched .gitignore edit can't silently unprotect.
+_HARD_PROTECTED = ("personal/", "outputs/ops/", "outputs/invoices/", "raw/")
+# Basename floor, matched at ANY depth. PAYMENT-DETAILS.md is the one file holding the live
+# wire block; the committed sibling is PAYMENT-DETAILS.template.md, which does not end with
+# "/PAYMENT-DETAILS.md" and so stays trackable on purpose.
+_HARD_PROTECTED_NAMES = ("PAYMENT-DETAILS.md",)
+
+
+def _gitignore_rules():
+    """(negated, pattern) rules from the repo-root .gitignore, in file order, lowercased.
+
+    An earlier version turned every line into a `startswith` prefix plus a bare basename.
+    That mis-modelled git three ways on this repo's own .gitignore, each way re-checked
+    against `git check-ignore`: `*.pyc` became the literal
+    prefix "*.pyc" and could never match a real path, so the rule was inert; `__pycache__/`
+    protected only repo-root-relative paths while git ignores that name at ANY depth; and
+    `.claude/settings.local.json` swallowed `.claude/settings.local.json.bak` because a
+    prefix test has no path boundary. Under- and over-protection from one parse.
+    Negations are kept (not dropped) so last-match-wins can be honoured: silently ignoring
+    a `!` line would make this claim MORE protection than git grants.
+    """
+    rules = []
+    # Policy, so it comes from the pushing checkout: a commit whose .gitignore had not yet
+    # hardened must still be judged against the protection rules in force today.
+    gi = LIVE_ROOT / ".gitignore"
+    if gi.is_file():
+        for line in gi.read_text(errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            neg = line.startswith("!")
+            rules.append((neg, line[1:].strip().lower() if neg else line.lower()))
+    return rules
+
+
+def _gi_match(pat: str, path: str) -> bool:
+    """True if gitignore pattern `pat` matches repo-relative `path` (both lowercased).
+
+    Models the subset git actually uses here: trailing "/" = directory rule (only things
+    BENEATH it match), a LEADING "/" or a "/" anywhere else = anchored at the repo root,
+    no "/" = match one path component at any depth, leading "**/" = the same, fnmatch globs
+    per component. A matched directory takes its whole subtree with it, as git does.
+    The leading "/" used to be stripped along with the trailing one, which turned an
+    anchored `/foo` into a match-anywhere `foo` and over-protected every nested foo in the
+    tree, contradicting both git and the line above.
+    Constructs outside this subset are refused loudly at load time by _gi_unsupported();
+    they are never silently approximated here.
+    """
+    dir_only = pat.endswith("/")
+    p = pat.rstrip("/")
+    if p.startswith("/"):
+        anchored, p = True, p.lstrip("/")
+    elif p.startswith("**/"):
+        anchored, p = False, p[3:]
+    else:
+        anchored = "/" in p
+    if not p:
+        return False
+    segs = path.split("/")
+    if anchored:
+        pseg = p.split("/")
+        if len(pseg) > len(segs):
+            return False
+        if not all(fnmatch.fnmatch(s, q) for s, q in zip(segs, pseg)):
+            return False
+        return len(segs) > len(pseg) if dir_only else True
+    if dir_only:                                   # a directory of that name, any depth
+        return any(fnmatch.fnmatch(s, p) for s in segs[:-1])
+    return any(fnmatch.fnmatch(s, p) for s in segs)
+
+
+def _gi_unsupported(rules):
+    """Names any .gitignore construct this matcher does not model. Non-empty = fatal.
+
+    Two constructs are deliberately NOT implemented, because this repo's .gitignore uses
+    neither and a half-modelled version of either is worse than none: a `**` anywhere other
+    than a leading `**/<single-segment>`, and a `!` re-include of something under an already
+    excluded directory (git cannot re-include those at all, so honouring the `!` would claim
+    LESS protection than git grants). Rather than approximate, the checker refuses to run the
+    day someone adds one, naming the line. Fail closed, loudly, on the same principle as
+    every other unreadable-input path in this file.
+    """
+    bad = []
+    for i, (neg, pat) in enumerate(rules):
+        core = pat.rstrip("/")
+        if "**" in core and not (core.startswith("**/") and "**" not in core[3:]
+                                 and "/" not in core[3:]):
+            bad.append(f'"{pat}": a `**` outside a leading `**/<name>` is not modelled')
+        if not neg:
+            continue
+        segs = core.lstrip("/").split("/")
+        parents = ["/".join(segs[:k]) for k in range(1, len(segs))]
+        for p_neg, p_pat in rules[:i]:
+            if p_neg:
+                continue
+            if any(_gi_match(p_pat, par + "/probe") for par in parents):
+                bad.append(f'"!{pat}": re-include under a directory already excluded by '
+                           f'"{p_pat}" is not modelled (git cannot re-include it either)')
+                break
+    return bad
+
+
+_GI_RULES = _gitignore_rules()
+_gi_bad = _gi_unsupported(_GI_RULES)
+if _gi_bad:
+    _die(".gitignore uses constructs this protected-path matcher does not model, so its "
+         "verdict could differ from git's: " + "; ".join(_gi_bad))
+# Printed by --print-protected and read by scripts/backup-sensitive: the rule strings, not
+# a match result. Only non-negated rules: a `!` line is an un-ignore, never a backup target.
+PROTECTED = tuple(sorted(set(_HARD_PROTECTED) | {p for neg, p in _GI_RULES if not neg}))
+PROTECTED_NAMES = tuple(sorted(n.lower() for n in _HARD_PROTECTED_NAMES))
+
+
+def is_protected(path: str) -> bool:
+    """The hardcoded floor (prefixes + basenames, any depth) UNIONed with git's own verdict
+    on the derived .gitignore rules (last match wins, exactly as git resolves them)."""
+    low = path.lower()
+    if low.startswith(_HARD_PROTECTED):
+        return True
+    if any(low == n or low.endswith("/" + n) for n in PROTECTED_NAMES):
+        return True
+    verdict = False
+    for neg, pat in _GI_RULES:
+        if _gi_match(pat, low):
+            verdict = not neg
+    return verdict
+
+
+# money-stale: SUMMARY.md is the sole cash authority; MONEY.md is its generated rollup.
+SUMMARY_MD = "knowledge/business/invoices/SUMMARY.md"
+MONEY_MD = "knowledge/business/MONEY.md"
+
+# core-bloat / core-restatement: knowledge/memory.md is the always-loaded bounded core, so
+# its size is a read cost every session pays and its pointer blocks are the one place a
+# number gets copied out of its owner file. Two different licences, deliberately not merged:
+# the size and line-length floor traces to the "bounded core that stops being readable in one
+# pass" hazard in ai/ERRORS.md, and the pointer-span floor traces to the 2026-07-11 incident
+# row, one owner per state fact. Both are a ratchet in CLAUDE.md's sense, not a content quota,
+# and knowledge/ops/os-roadmap.md carries the eviction habit they sit under. Scoped to this
+# one file on purpose: a repo-wide version opens with a wall of hits on files nobody is
+# cleaning up today, and a check that opens loud on unrelated work gets switched off inside
+# a week.
+CORE_FILE = "knowledge/memory.md"
+CORE_MAX_BYTES = 35000
+CORE_MAX_LINE = 2000
+# The core's pointer spans, half-open: from the START heading up to, NOT including, the END
+# heading, which belongs to the next section. A pointer names WHERE a value lives, never
+# what it is, so a currency figure inside a span is a restatement of a number owned by
+# another file. Anchored on heading text, never line numbers; a span whose anchors stop
+# matching reports itself blind instead of passing quietly.
+#
+# Each span carries `exempt`: the enumerated currency literals the core legitimately owns
+# or quotes as doctrine inside that span. A hand-listed tuple, never a pattern, so it can
+# never widen silently, and an entry that stops appearing in its span is reported stale so
+# it gets pruned instead of quietly covering a future restatement.
+#
+# NOT spanned, on purpose: the core's narrative sections legitimately carry figures that
+# memory.md itself is the owner of (a doctrine threshold, a struck historical band, a quoted
+# decision row). A span there would be an exemption list guarding nothing, so it is not
+# shipped. Only the two POINTER regions are spanned, because a pointer region is by
+# definition a place that routes to an owner and therefore owns no figure at all.
+CORE_POINTER_SPANS = (
+    # The client pointer region. Every price that belongs to a client belongs to that
+    # client's file under knowledge/clients/, so nothing here is legitimate and the
+    # exemption tuple is empty and stays empty.
+    ("### Clients", "### Money",
+     "client pointer region", "the owning knowledge/clients/<client>/ file", ()),
+    # The money and pricing pointer region: the money section routes cash to
+    # knowledge/business/MONEY.md, the invoice ledger and the client roadmaps. It is the
+    # region where a compression pass has already been caught leaving live cash literals
+    # inside a clause that declares it owns no figure.
+    #
+    # The exemption tuple ships EMPTY on purpose. It is where a currency literal the core
+    # genuinely owns inside this span gets hand-enumerated, one literal at a time, with the
+    # reason written next to it. A hand-listed tuple can never widen silently, and an entry
+    # that stops appearing in its span is reported stale so it gets pruned instead of
+    # quietly covering a future restatement. Adding a figure here is a deliberate act; the
+    # empty tuple is what makes the span a ratchet rather than a rubber stamp.
+    ("### Money", "### Open questions",
+     "money and pricing pointer region",
+     "the owning file (knowledge/business/MONEY.md for cash, the invoice ledger for "
+     "numbering, the client roadmap or knowledge/business/outbound-offer.md for a price)",
+     ()),
+)
+# Deliberately just a currency sign followed by a digit; the trailing group only makes the
+# reported token readable and matches the same positions the bare shape does.
+CORE_MONEY = re.compile(r"[£$][0-9][0-9,.]*[kKmM]?")
+
+# tombstones: retired values (ripple rule, CLAUDE.md) must not reappear un-bannered.
+# Traces to the 2026-07-11 row in ai/ERRORS.md: a superseded price lived in four files, only
+# one was updated when the number changed, and one of the three current-sounding copies was
+# grabbed for a client message.
+TOMB_FILE = "ai/TOMBSTONES.md"
+TOMB_HARD_PREFIXES = ("knowledge/", ".agents/", ".claude/", ".github/", "templates/", "skills/")
+# Historical-framing PROSE is a legitimate carrier of a dead value. The bare `~~` alternative is
+# deliberately GONE from this pattern: a strike is now judged per token by struck_spans, because
+# testing a whole line for `~~` anywhere meant one dead value struck on a line exempted every
+# other value on it. That is not hypothetical: it hid an un-struck retired price in
+# knowledge/business/outbound-offer.md, the file CLAUDE.md names as the pricing authority for
+# the outbound motion, on a line whose OTHER copy of the same string is correctly struck.
+TOMB_MARKER = re.compile(
+    r"(?i:supersed|raise target|tombstone|re-priced|re-set|dead (?:price|number|value)|redacted)")
+# Kept only for the selfcheck's regression case; no scanning path reads it any more.
+TOMB_EXEMPT_LINE = re.compile(r"~~|" + TOMB_MARKER.pattern)
+# A whole-file exemption requires the EXACT bolded banner CLAUDE.md's own status-banner rule
+# prescribes, as the FIRST line and nothing else on it. The old test was `"SUPERSEDED" in ln` over
+# the first 15 lines, which exempted dozens of tracked files including a live client roadmap
+# carrying a live quoted price, and in one case matched the word inside a JSON status field. Anything
+# looser than this is judged occurrence by occurrence, which is the honest default.
+TOMB_BANNER_EXACT = re.compile(r"^\s*\*\*SUPERSEDED\b[^*]*\*\*[.\s]*$")
+# Office payloads have no lines, so the exemption is proximity-scoped instead: a marker
+# counts only within this many characters of the hit in the extracted XML text.
+TOMB_EXEMPT_WINDOW = 300
+
+# dead-artifact-ref: a .md file whose head declares itself DEAD/OVERTAKEN must not be
+# referenced un-struck in live-sounding text. Traces to the "snapshot drift" hazard in
+# ai/ERRORS.md: the tombstone ledger reaches copied VALUES, and a whole artifact that died
+# is the face of the same shape it cannot see. This check fires only once the artifact IS
+# bannered (the status-banner rule requires that at declare time; the skill's /eod step is
+# what performs it), so it is the floor under drift AFTER the banner exists, not a detector
+# of unbannered death - that half stays procedural, stated in the hazard.
+DEAD_BANNER = re.compile(r"^\s*\*\*(?:DEAD|OVERTAKEN)\b")
+DEAD_BANNER_HEAD_LINES = 5
+# Outside STATS.md, historical framing near the reference is legitimate carriage, the same
+# tradeoff as TOMB_MARKER. On STATS.md it is NOT: the carry-over bucket is the planning
+# surface /plan trusts, so a dead reference there is struck or re-based, never annotated -
+# "partly DEAD as drafted" sat next to the path for a week while the owner file said fully
+# dead. Frozen logbook history (days/, reviews/, LOGBOOK.md rows) is excluded entirely:
+# hard rule 4 forbids rewriting it, so a hit there would nag forever with no legal fix.
+DEAD_REF_MARKER = re.compile(
+    r"(?i:dead|overtaken|historical|supersed|struck|not to be sent|never sent|bannered)")
+DEAD_REF_STRICT = "knowledge/ops/logbook/STATS.md"
+DEAD_REF_FROZEN = ("knowledge/ops/logbook/days/", "knowledge/ops/logbook/reviews/",
+                   "knowledge/ops/logbook/LOGBOOK.md")
+
+
+def tomb_exempt_at(text, start, end, spans=()):
+    """Is the occurrence at [start, end) in `text` legitimately carrying a dead value?
+
+    Two independent exemptions, both scoped to THIS occurrence and nothing else:
+      1. a strikethrough span wraps it (the author retired this token in place);
+      2. historical-framing prose sits within TOMB_EXEMPT_WINDOW chars of it.
+    Line-level and file-level tests were what made this gate lie. Stated limit, honestly: one
+    marker still covers every occurrence inside its own window, so a banner can shelter a
+    neighbour it was not written for. That is a window-size tradeoff, not a scope hole.
+    """
+    if any(a <= start < b or a < end <= b for a, b in spans):
+        return True
+    near = text[max(0, start - TOMB_EXEMPT_WINDOW):end + TOMB_EXEMPT_WINDOW]
+    return bool(TOMB_MARKER.search(near))
+
+
+def tomb_selfcheck():
+    """[(label, ok)] for the exemption rules. Pure: returns results, never exits, never prints."""
+    r = []
+    W_ = TOMB_EXEMPT_WINDOW
+    pad = "x" * (W_ + 50)
+    # a struck token is exempt; an un-struck token on the SAME line is not
+    line = "we quoted ~~$77,777~~ but the offer is a $42k install now"
+    spans = struck_spans(line)
+    i_struck = line.index("$77,777")
+    i_live = line.index("$42k install")
+    r.append(("strike:wrapped-token-exempt",
+              tomb_exempt_at(line, i_struck, i_struck + 7, spans) is True))
+    r.append(("strike:sibling-on-same-line-NOT-exempt",
+              tomb_exempt_at(line, i_live, i_live + 12, spans) is False))
+    # prose marker near / far
+    near_txt = "this was superseded in 2026: $42k install"
+    j = near_txt.index("$42k")
+    r.append(("prose:marker-near-exempt", tomb_exempt_at(near_txt, j, j + 4) is True))
+    far = "superseded" + pad + "$42k install"
+    k = far.index("$42k")
+    r.append(("prose:marker-far-NOT-exempt", tomb_exempt_at(far, k, k + 4) is False))
+    # exact banner vs loose substring
+    r.append(("banner:exact-form-matches",
+              bool(TOMB_BANNER_EXACT.match("**SUPERSEDED - see knowledge/x.md**"))))
+    r.append(("banner:exact-with-trailing-period",
+              bool(TOMB_BANNER_EXACT.match("**SUPERSEDED 2026-07-12 - see x.md**."))))
+    r.append(("banner:loose-prose-does-NOT-match",
+              TOMB_BANNER_EXACT.match("Note: this section is SUPERSEDED, see below") is None))
+    r.append(("banner:word-in-json-field-does-NOT-match",
+              TOMB_BANNER_EXACT.match('    "status": "SUPERSEDED",') is None))
+    r.append(("banner:bolded-but-other-text-does-NOT-match",
+              TOMB_BANNER_EXACT.match("**SUPERSEDED** but only for pricing") is None))
+    return r
+
+
+def load_tombstones():
+    p = ROOT / TOMB_FILE
+    if not p.is_file():
+        return []
+    rows = []
+    for line in p.read_text(errors="ignore").splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or not cells[0] or set(cells[0]) <= set("-: ") \
+                or cells[0].lower() == "dead string":
+            continue
+        s = cells[0].strip("`")
+        rows.append((s, re.compile(
+            r"(?<![A-Za-z0-9])" + re.escape(s) + r"(?![A-Za-z0-9])", re.I)))
+    return rows
+
+
+def _digit_run(sep: str) -> str:
+    r"""A 9+ digit run whose digits may be split by `sep` chars OR by a line wrap.
+
+    Wrap tolerance exists because a probe found the gate half blind: an account number
+    sitting on one line fired, while the same number wrapped mid-run, six digits then a
+    newline then three, was silent in every extension the gate covers. A hard-wrapped line,
+    a diff, and an indented YAML/JSON continuation all produce that shape. One definition,
+    used by all three keyword-anchored runs, so widening one can never leave the others
+    behind. Measured at adoption: no new hits across the tracked text files, so the tolerance
+    costs nothing in false positives. (No literal sample lives in this file: the gate would
+    flag its own source, which it correctly did on the first draft of this docstring.)
+
+    The separator run is `{0,2}`, not one char. One char could not cross the `) ` in the
+    commonest US format, so a parenthesized area code evaded the gate while the hyphenated
+    form of the SAME number fired. Measured at adoption: newly matched two tracked files,
+    both real phone numbers, one of them a third-party number with business hours, which is
+    exactly the third-party-PII class this gate exists for and was invisible to the narrower
+    run. The `.` separator was tested and REJECTED: it makes `phone: 192.168.1.100` a HARD
+    violation, and this repo documents self-hosted infra.
+    """
+    return r"\d(?:[" + sep + r"]{0,2}\d|\n[ \t>|*-]{0,4}\d){8,}"
+
+
+# Wire-detail shapes. Deliberately keyword-anchored, because bare digit runs false-positive.
+# SWIFT pattern: keyword case-insensitive, value case-sensitive (8/11-char BIC shape),
+# separator class wide enough to cross "SWIFT / BIC Code |" table formatting.
+SECRET_PATTERNS = [
+    # Digit runs are separator-tolerant so grouped forms ("1234 5678 9") don't evade.
+    # Floors raised to 9 total digits: real ABA/routing/account numbers are >=9, while
+    # date (8-digit) and line-range noise near these keywords stays under the bar.
+    re.compile(r"(?i)(swift|iban|\baba\b|routing)\D{0,40}" + _digit_run(r" \-")),
+    re.compile(r"(?i)account\s*(number|no\.?|#)?\D{0,20}" + _digit_run(r" \-")),
+    re.compile(r"(?i:swift|bic)(?i:\W{0,15}code)?\W{0,10}\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b"),
+    # Phone shapes (third-party PII, the same hazard as the credential arms below: a fetched
+    # research source carries somebody's direct line and commits clean). International with
+    # a (0) infix, plus a keyword-anchored digit run.
+    re.compile(r"\+\d{1,3}[ .\-]?\(0\)\s?\d{3,4}[ \-]?\d{4,6}"),
+    re.compile(r"(?i)\b(?:mobile|phone|telephone|tel|cell)\b\W{0,15}\+?" + _digit_run(r" \-()")),
+    # IBANs whose BBAN carries LETTERS (GB, IE, MT and much of Europe) could not match the
+    # keyword+digit-run rule above at all: `\D{0,40}` cannot cross the country check digits and
+    # a digit run cannot cross a letter. So `iban` sat in that alternation structurally inert
+    # for the dominant format, which reads as covered while covering nothing. Keyword-anchored
+    # and case-sensitive on the value to stay false-positive free, wrap-tolerant for the same
+    # reason the digit run is. Measured at adoption: 0 hits across every tracked file. Any
+    # European client or supplier paying by IBAN produces exactly this shape.
+    re.compile(r"(?i)\biban\b\W{0,20}(?-i:[A-Z]{2}\d{2}(?:[ \-]?[A-Z0-9]|\n[ \t>|*-]{0,4}[A-Z0-9]){10,30})"),
+    # Provider-prefix credential shapes. Zero false positives measured across every tracked
+    # text file at add time. Hazard, not incident: a client build that runs a managed
+    # database and a transactional mail provider hands the operator a service-role JWT and
+    # an api key, and pasted into a client file either one would commit clean without this.
+    # See "Credential and third-party contact shapes arriving through the work" in the
+    # Hazards section of ai/ERRORS.md. Generic password= / api_key=
+    # assignment shapes are deliberately NOT here: they fire on client workflow prose that
+    # names env vars, and alert fatigue is its own failure mode in this repo.
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{50,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bre_[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    # PEM private keys: RSA/DSA/EC/OPENSSH/PGP plus the PKCS#8 ENCRYPTED form. DSA and the
+    # encrypted variant were missing once, so two real key headers read as clean text.
+    re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"),
+]
+# Text families the secrets + tombstone scanners decode. The suffix is ALWAYS lowercased at
+# the call site: the filesystem is case-insensitive, so a SECRETS.MD bypass would be too.
+# "" covers extensionless scripts and configs, gated by a NUL sniff so binaries are never
+# decoded. Traces to the guardrail-rot hazard in ai/ERRORS.md, which names this shape
+# exactly: a scanner whose input list quietly excludes the files it was written for is the
+# same no-op as having no check at all, and it leaves the run green.
+TEXT_EXT = {".md", ".txt", ".json", ".csv", ".html", ".yaml", ".yml", ".js", ".py", ".ts",
+            ".sh", ".bash", ".zsh", ".env", ".xml", ".toml", ".ini", ".cfg", ".conf",
+            ".sql", ".tsx", ".jsx", ".mjs", ".cjs", ".mdx", ".text", ""}
+MAGIC = {".docx": b"PK\x03\x04", ".xlsx": b"PK\x03\x04", ".pdf": b"%PDF"}
+# The ONE enumerated silent path. A file is skipped with no output ONLY when it holds NUL bytes
+# AND its suffix is listed here. Everything else is decoded and scanned, or named on
+# `unscanned-suffix`. ORDERING RULE, do not break it: this set is consulted AFTER the NUL sniff,
+# never before, because a suffix list consulted first is exactly the defect being removed here.
+BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tiff", ".heic",
+              ".pdf", ".mp4", ".mov", ".mp3", ".wav", ".m4a", ".woff", ".woff2", ".ttf",
+              ".otf", ".eot", ".so", ".dylib", ".o", ".pyc", ".gz", ".tgz", ".bz2", ".xz",
+              ".7z", ".rar", ".enc", ".sqlite", ".db", ".DS_Store"}
+OFFICE_EXT = {".docx", ".xlsx"}   # the only archives whose interior is validated and scanned
+
+SANDBOX = re.compile(r"/mnt/skills|/home/claude|/mnt/user-data")
+# A committed script that hardcodes one machine's absolute home path is a footgun with a
+# blast radius outside its own tree. This has happened here, and it is the 2026-07-29 row in
+# ai/ERRORS.md: the generator an agent ran carried one machine's absolute home path, so its
+# own anti-clobber guard was reading the live tree while the agent believed it was in a
+# scratch copy, and a working file got overwritten. Every other script derives its root from
+# `git rev-parse --show-toplevel`. Scoped to the executable surface only
+# (scripts/, .githooks/): outputs/ legitimately quotes absolute paths in prose and probe
+# transcripts. The character class cannot match this line, because the literal source text
+# after the prefix is `[`, which the class excludes, so the check never flags its own regex.
+MACHINE_PATH = re.compile(r"/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/")
+MACHINE_PATH_DIRS = ("scripts/", ".githooks/")
+LIVE_STATE = re.compile(
+    r"(?im)^[\s>*-]{0,4}\**\s*(last\s+)?(updated?|update[ds]?|status)\b[^\n]*?"
+    r"(20\d{2}-\d{2}-\d{2}|awaiting|pending|waiting)"
+    r"|^[\s>*-]{0,4}\**\s*awaiting\b")
+
+hard, soft = [], []
+
+
+def git(*args, ok=(0,)) -> str:
+    """Run git, fail closed on any unexpected exit status.
+
+    `ok` widens the accepted set for calls whose nonzero status is a real answer, not a
+    failure (`config --get` exits 1 when the key is simply unset). Everything else (a
+    corrupt index, a missing object, a locked repo) aborts the scan instead of being
+    read as "no files, nothing to check".
+    """
+    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=ROOT)
+    if r.returncode not in ok:
+        _die(f"`git {' '.join(args)}` exited {r.returncode}: {r.stderr.strip()[:200]}")
+    return r.stdout
+
+
+def blob(path: str) -> bytes:
+    if STAGED:
+        r = subprocess.run(["git", "show", ":" + path], capture_output=True, cwd=ROOT)
+        if r.returncode != 0:
+            _die(f"`git show :{path}` exited {r.returncode}: "
+                 f"{r.stderr.decode('utf-8', errors='ignore').strip()[:200]}")
+        return r.stdout
+    p = ROOT / path
+    return p.read_bytes() if p.is_file() else b""
+
+
+def adapter_contract_present(subject="subject"):
+    evidence_paths = (
+        AGENT_ROUTES,
+        AGENT_SYNC_PATH,
+        "scripts/repo-doctor",
+        "CLAUDE.md",
+        *AGENT_DISCOVERY_PATHS,
+        *AGENT_CONVERTED_PATHS,
+    )
+    if subject == "subject" and STAGED:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", *evidence_paths],
+            capture_output=True,
+            cwd=ROOT,
+        )
+        if listed.returncode != 0:
+            _die(f"`git ls-files` failed while locating adapter controls: "
+                 f"{listed.stderr.decode('utf-8', errors='ignore').strip()[:200]}")
+        present = set(listed.stdout.decode("utf-8", errors="replace").split("\0")) - {""}
+
+        def subject_text(path):
+            shown = subprocess.run(["git", "show", ":" + path], capture_output=True, cwd=ROOT)
+            if shown.returncode != 0:
+                _die(f"`git show :{path}` exited {shown.returncode}: "
+                     f"{shown.stderr.decode('utf-8', errors='ignore').strip()[:200]}")
+            return shown.stdout.decode("utf-8", errors="replace")
+    elif subject == "subject":
+        present = {
+            path for path in evidence_paths
+            if (ROOT / path).exists() or (ROOT / path).is_symlink()
+        }
+
+        def subject_text(path):
+            candidate = ROOT / path
+            return candidate.read_text(errors="replace") if candidate.is_file() else ""
+    else:
+        verified = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{subject}^{{tree}}"],
+            capture_output=True,
+            cwd=ROOT,
+        )
+        if verified.returncode != 0:
+            return False
+        listed = subprocess.run(
+            ["git", "ls-tree", "-r", "-z", "--name-only", subject, "--", *evidence_paths],
+            capture_output=True,
+            cwd=ROOT,
+        )
+        if listed.returncode != 0:
+            _die(f"`git ls-tree {subject}` failed while locating adapter controls: "
+                 f"{listed.stderr.decode('utf-8', errors='ignore').strip()[:200]}")
+        present = set(listed.stdout.decode("utf-8", errors="replace").split("\0")) - {""}
+
+        def subject_text(path):
+            spec = f"{subject}:{path}"
+            shown = subprocess.run(["git", "show", spec], capture_output=True, cwd=ROOT)
+            if shown.returncode != 0:
+                _die(f"`git show {spec}` exited {shown.returncode}: "
+                     f"{shown.stderr.decode('utf-8', errors='ignore').strip()[:200]}")
+            return shown.stdout.decode("utf-8", errors="replace")
+
+    if AGENT_ROUTES in present or AGENT_SYNC_PATH in present or present.intersection(AGENT_DISCOVERY_PATHS):
+        return True
+    for path in AGENT_CONVERTED_PATHS:
+        if path in present and AGENT_GENERATED_HEADER in subject_text(path):
+            return True
+    doctor = subject_text("scripts/repo-doctor") if "scripts/repo-doctor" in present else ""
+    contract = subject_text("CLAUDE.md") if "CLAUDE.md" in present else ""
+    return AGENT_DOCTOR_MARKER in doctor or (AGENT_ROUTES in contract and AGENT_SYNC_PATH in contract)
+
+
+def adapter_contract_present_in_parents():
+    head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, cwd=ROOT)
+    if head.returncode != 0:
+        return False
+    result = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if result.returncode != 0:
+        _die(f"`git rev-list --parents -n 1 HEAD` exited {result.returncode}: "
+             f"{result.stderr.strip()[:200]}")
+    parts = result.stdout.strip().split()
+    return any(adapter_contract_present(parent) for parent in parts[1:])
+
+
+def adapter_contract_present_in_pending_merge():
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        _die(f"`git rev-parse --git-path MERGE_HEAD` exited {result.returncode}: "
+             f"{result.stderr.strip()[:200]}")
+    merge_head_path = Path(result.stdout.strip())
+    if not merge_head_path.is_absolute():
+        merge_head_path = ROOT / merge_head_path
+    if not merge_head_path.exists():
+        return False
+    try:
+        merge_heads = [line.strip() for line in merge_head_path.read_text().splitlines() if line.strip()]
+    except OSError as exc:
+        _die(f"could not read pending merge heads from {merge_head_path}: {exc}")
+    if not merge_heads:
+        _die(f"{merge_head_path} exists but contains no merge parent")
+    for merge_head in merge_heads:
+        if not re.fullmatch(r"[0-9a-f]{40,64}", merge_head):
+            _die(f"{merge_head_path} contains an invalid object id")
+        verified = subprocess.run(
+            ["git", "cat-file", "-e", f"{merge_head}^{{commit}}"],
+            capture_output=True,
+            cwd=ROOT,
+        )
+        if verified.returncode != 0:
+            _die(f"pending merge parent {merge_head} is not a readable commit")
+    return any(adapter_contract_present(merge_head) for merge_head in merge_heads)
+
+
+def _safe_adapter_fixture_path(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError("adapter fixture path is empty")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or str(path) != value:
+        raise ValueError(f"unsafe adapter fixture path: {value!r}")
+    return value
+
+
+def _adapter_subject_mode(path):
+    if STAGED:
+        result = subprocess.run(
+            ["git", "ls-files", "--stage", "--", path],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        if result.returncode != 0:
+            raise OSError(f"git ls-files --stage failed for {path}: {result.stderr.strip()[:200]}")
+        rows = [line for line in result.stdout.splitlines() if line]
+        if len(rows) != 1:
+            raise ValueError(f"staged adapter fixture path has {len(rows)} index entries: {path}")
+        fields = rows[0].split(None, 3)
+        if len(fields) < 4 or fields[2] != "0" or fields[0] not in {"100644", "100755"}:
+            raise ValueError(f"staged adapter fixture path is not a regular stage-0 file: {path}")
+        return 0o755 if fields[0] == "100755" else 0o644
+    candidate = ROOT / path
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError(f"adapter fixture path is missing or non-regular: {path}")
+    return candidate.stat().st_mode & 0o777
+
+
+def verify_agent_generator_behavior():
+    """Challenge the live generator in a disposable tree after its clean claim.
+
+    Source-shape checks cannot distinguish a real synchronizer from a padded no-op that keeps
+    marker strings and prints the clean sentinel. That is the guardrail-rot hazard in
+    ai/ERRORS.md in its purest form, and the hazard names this probe pair as its answer. A
+    clean run plus two known-bad runs can tell them apart: the same executable must reject
+    both stale output and removal of a planning alias the generator's compatibility floor
+    pins. The live repository and index remain untouched.
+    """
+    try:
+        manifest_bytes = blob(AGENT_ROUTES)
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        paths = {AGENT_ROUTES, AGENT_SYNC_PATH}
+        paths.add(_safe_adapter_fixture_path(manifest["canonical_contract"]))
+        for workflow in manifest["workflows"]:
+            paths.add(_safe_adapter_fixture_path(workflow["canonical_skill"]))
+        for item in manifest["required_existing"]:
+            paths.add(_safe_adapter_fixture_path(item["path"]))
+        for entries in manifest["generated_surfaces"].values():
+            for entry in entries:
+                paths.add(_safe_adapter_fixture_path(entry["path"]))
+        with tempfile.TemporaryDirectory(prefix="repo-doctor-agent-adapters-") as directory:
+            fixture = Path(directory)
+            for path in sorted(paths):
+                destination = fixture / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(blob(path))
+                destination.chmod(_adapter_subject_mode(path))
+
+            challenge_path = fixture / "AGENTS.md"
+            original_challenge = challenge_path.read_bytes()
+            challenge_path.write_bytes(original_challenge + b"\n<!-- repo-doctor stale challenge -->\n")
+            stale = subprocess.run(
+                [sys.executable, str(AGENT_SYNC), "--check", "--root", str(fixture)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            stale_output = stale.stderr + "\n" + stale.stdout
+            if stale.returncode != 1 or "generated surface stale: AGENTS.md" not in stale_output:
+                return False, f"stale-surface probe returned {stale.returncode}: {stale_output.strip()[:240]}"
+
+            challenge_path.write_bytes(original_challenge)
+            plan = next(
+                mode
+                for workflow in manifest["workflows"] if workflow["id"] == "daily-log"
+                for mode in workflow["modes"] if mode["id"] == "plan"
+            )
+            plan["aliases"].remove("let's plan the day")
+            (fixture / AGENT_ROUTES).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            alias = subprocess.run(
+                [sys.executable, str(AGENT_SYNC), "--check", "--root", str(fixture)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            alias_output = alias.stderr + "\n" + alias.stdout
+            if alias.returncode != 2 or "dropped compatibility aliases: let's plan the day" not in alias_output:
+                return False, f"required-alias probe returned {alias.returncode}: {alias_output.strip()[:240]}"
+    except (KeyError, OSError, StopIteration, TypeError, UnicodeError, ValueError) as exc:
+        return False, f"could not construct generator probes: {type(exc).__name__}: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, "generator negative probe did not finish within 10s"
+    return True, ""
+
+
+def load_allows():
+    """Parse .repo-doctor-allow. Grammar, one entry per line:
+
+        <check-id> <path-glob>[::<token-glob>] reason=<text> expires=YYYY-MM-DD
+
+    The regex is ANCHORED (fullmatch) and the date is parsed defensively: the old
+    unanchored form accepted trailing garbage after the date, accepted an empty reason,
+    and handed a digit-shaped but calendar-invalid date (2026-13-40) straight to
+    date.fromisoformat(), which raised an uncaught ValueError and killed the whole run
+    with a traceback, the opposite of the legible failure this file exists to produce.
+    A malformed line is now one HARD `allow-syntax` line and is skipped; the rest of the
+    file still parses, so one typo cannot switch the scanner off.
+
+    The optional `::<token-glob>` narrows an entry to a specific finding inside a file
+    (used by dead-pointer: check-id + file + the cited token, not the whole file).
+    """
+    allows, today = [], date.today()
+    if not ALLOW_FILE.is_file():
+        return allows
+    for n, line in enumerate(ALLOW_FILE.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.fullmatch(r"(\S+)\s+(\S+)\s+reason=(\S.*?)\s+expires=(\d{4}-\d{2}-\d{2})", line)
+        if not m:
+            hard.append(f"allow-syntax: .repo-doctor-allow:{n} unparseable "
+                        f"(want `<check-id> <glob>[::<token-glob>] reason=<text> "
+                        f"expires=YYYY-MM-DD`): {line!r}")
+            continue
+        check, glob, reason, exp = m.groups()
+        try:
+            exp_d = date.fromisoformat(exp)
+        except ValueError:
+            hard.append(f"allow-syntax: .repo-doctor-allow:{n} [{check} {glob}] "
+                        f"expires={exp} is not a real calendar date")
+            continue
+        if exp_d < today:
+            hard.append(f"allow-expired: .repo-doctor-allow:{n} [{check} {glob}] expired {exp}")
+        elif exp_d > today + timedelta(days=90):
+            hard.append(f"allow-too-long: .repo-doctor-allow:{n} [{check} {glob}] expiry >90 days out")
+        else:
+            pg, _, tg = glob.partition("::")
+            allows.append((check, pg, tg or None))
+    return allows
+
+
+def allowed(check: str, path: str, allows, token: str = None) -> bool:
+    """check-id matches EXACTLY (never as a glob), path matches as a glob.
+
+    Exact check-id matching is what keeps `money-stale` from silencing `money-monthstale`
+    and vice versa; the two mechanisms were deliberately given separate ids for that
+    reason, and a glob on the id would have collapsed them straight back together.
+    An entry carrying a `::<token-glob>` matches only that finding: a dead-pointer entry
+    for one rotten citation no longer switches the whole file's pointer checking off.
+    """
+    for c, g, tg in allows:
+        if c != check or not fnmatch.fnmatch(path, g):
+            continue
+        if tg is not None and not (token is not None and fnmatch.fnmatch(token, tg)):
+            continue
+        return True
+    return False
+
+
+def office_ok(data: bytes, suffix: str):
+    """Validate a real .docx/.xlsx payload. Returns (True, extracted_xml_text) or (False, reason).
+
+    Same checks the inline block ran before: every .xml member parses, and for .docx the
+    word/document.xml root is <document> with a <body> child. Factored out so the tombstone
+    scanner can reuse the extracted text instead of decoding the file twice.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            parts = {}
+            for n in z.namelist():
+                if n.endswith(".xml"):
+                    raw = z.read(n)
+                    ET.fromstring(raw)  # ParseError on malformed member xml
+                    parts[n] = raw
+            text = "".join(raw.decode("utf-8", errors="ignore") for raw in parts.values())
+            if suffix == ".docx":
+                doc = parts.get("word/document.xml")
+                if doc is None:
+                    raise ValueError("missing word/document.xml")
+                root = ET.fromstring(doc)
+                if root.tag.rsplit("}", 1)[-1] != "document":
+                    raise ValueError("word/document.xml root is not <document>")
+                if not any(c.tag.rsplit("}", 1)[-1] == "body" for c in root):
+                    raise ValueError("word/document.xml has no <body> child")
+            return True, text
+    except (zipfile.BadZipFile, ET.ParseError, ValueError) as e:
+        return False, str(e)
+
+
+def _local_struck_spans(line: str):
+    """Degraded fallback for struck_spans, used ONLY when clock_grammar fails to load.
+
+    Kept deliberately. repo-doctor must never go down over a clock problem: it also carries the
+    secrets and protected-path gates, and an exit here would take those with it while both hooks
+    read a nonzero status as BLOCKED and a zero status as clean. So a grammar that will not load
+    degrades this one check and says so on `clock-horizon-broken`, rather than aborting the scan.
+    """
+    marks = [m.start() for m in re.finditer("~~", line)]
+    spans = [(marks[i], marks[i + 1] + 2) for i in range(0, len(marks) - 1, 2)]
+    if len(marks) % 2:
+        spans.append((marks[-1], len(line)))
+    return spans
+
+
+# The Due/Stale grammar has ONE owner, scripts/clock_grammar.py. This file used to
+# carry its own mirror of struck_spans with a docstring conceding "two scripts, no shared module";
+# that mirror is why the parser and its own safety net could disagree about what "struck" means.
+# Loaded soft on purpose: see _local_struck_spans above for why repo-doctor never dies here.
+def _load_clock_grammar(script_dir):
+    import importlib.util
+    _p = Path(script_dir) / "clock_grammar.py"
+    if not _p.is_file():
+        return None, f"scripts/clock_grammar.py missing at {_p}"
+    try:
+        _spec = importlib.util.spec_from_file_location("clock_grammar", _p)
+        _m = importlib.util.module_from_spec(_spec)
+        _dwb = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            _spec.loader.exec_module(_m)
+        finally:
+            sys.dont_write_bytecode = _dwb
+    except BaseException as e:                  # noqa: BLE001
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        return None, f"scripts/clock_grammar.py failed to load: {type(e).__name__}: {e}"
+    for _n in ("due_tokens", "struck_spans", "fenced_flags", "grammar_selfcheck"):
+        if not hasattr(_m, _n):
+            return None, f"scripts/clock_grammar.py is missing {_n}()"
+    _bad = [lab for lab, ok in _m.grammar_selfcheck() if not ok]
+    if _bad:
+        return None, "scripts/clock_grammar.py selfcheck failed: " + ", ".join(_bad)
+    return _m, None
+
+
+_CG, _CG_ERR = _load_clock_grammar(Path(__file__).resolve().parent)
+struck_spans = _CG.struck_spans if _CG else _local_struck_spans
+
+def main() -> int:
+    if "--print-protected" in sys.argv:
+        for p in PROTECTED:
+            print(p)
+        for n in PROTECTED_NAMES:
+            print(n)
+        return 0
+    allows = load_allows()
+
+    # agent-adapters: one route registry generates every provider discovery surface. Traces
+    # to the guardrail-rot hazard in ai/ERRORS.md, which names the generated-view face of that
+    # shape: a view that drifts from its registry leaves every check green while one model
+    # reads different policy from the others, so "let's plan the day" routes a Claude session
+    # into the daily-log skill and a different agent into a generic intake. HARD in both
+    # modes: a stale adapter means a model silently runs different policy.
+    # The generator reads the git index in staged mode,
+    # so staging the owner without its generated views cannot pass on clean worktree bytes.
+    # Historical commits from before the registry existed are skipped during range scans.
+    # Installation evidence includes the subject doctor marker, HEAD, every parent of HEAD, and
+    # every pending MERGE_HEAD, so deleting the manifest and generator together cannot make the
+    # check disappear through a linear commit, a committed merge, or `merge --no-commit`. The
+    # subject generator is still validated by the live generator; executing arbitrary staged or
+    # historical code is deliberately avoided. After a clean claim, two disposable negative
+    # probes independently prove the live generator rejects stale output and a dropped trigger.
+    # Allow entries for both ids are FILE-SCOPED only (every allowed() call below passes no
+    # token, and allowed() skips ::token entries when called without one): the two working
+    # shapes are `agent-adapters ai/AGENT_ROUTES.json` and
+    # `agent-adapter-check-broken scripts/sync-agent-adapters`, and each HARD line names its
+    # own. That entry is the sanctioned unblock when a generator-text change retroactively
+    # marks older commits in a push range stale: expected surfaces render from the LIVE
+    # generator's fixed strings, so a commit clean when made can re-read as stale after a
+    # later wording change, and `--write` cannot fix a historical commit.
+    _agent_installed = adapter_contract_present()
+    if not _agent_installed:
+        _agent_installed = adapter_contract_present("HEAD")
+    if not _agent_installed:
+        _agent_installed = adapter_contract_present_in_parents()
+    if not _agent_installed:
+        _agent_installed = adapter_contract_present_in_pending_merge()
+    if _agent_installed:
+        _broken_allow = ("file-scoped allow entry: agent-adapter-check-broken "
+                         + AGENT_SYNC_PATH)
+        if not AGENT_SYNC.is_file() or AGENT_SYNC.is_symlink() or not (AGENT_SYNC.stat().st_mode & 0o111):
+            if not allowed("agent-adapter-check-broken", AGENT_SYNC_PATH, allows):
+                hard.append("agent-adapter-check-broken: scripts/sync-agent-adapters is missing "
+                            "or is not a regular executable file, so generated model surfaces "
+                            f"cannot be verified ({_broken_allow})")
+        else:
+            _cmd = [sys.executable, str(AGENT_SYNC), "--check", "--root", str(ROOT)]
+            if STAGED:
+                _cmd.append("--staged")
+            try:
+                _agent_check = subprocess.run(_cmd, capture_output=True, text=True,
+                                              cwd=str(ROOT), timeout=10)
+            except subprocess.TimeoutExpired:
+                _agent_check = None
+                if not allowed("agent-adapter-check-broken", AGENT_SYNC_PATH, allows):
+                    hard.append("agent-adapter-check-broken: scripts/sync-agent-adapters "
+                                "did not finish within 10s, so no model surface was verified "
+                                f"({_broken_allow})")
+            if _agent_check is not None and _agent_check.returncode != 0:
+                # [:12] and [:900] fit all 8 stale-surface lines PLUS the generator's remedy
+                # line; the old [:4]/[:600] cut the remedy exactly when 4+ surfaces were stale.
+                _lines = (_agent_check.stderr + "\n" + _agent_check.stdout).strip().splitlines()
+                _detail = "; ".join(line.strip() for line in _lines[:12] if line.strip())
+                _check_id = "agent-adapters" if _agent_check.returncode == 1 else \
+                    "agent-adapter-check-broken"
+                _allow_path = AGENT_ROUTES if _check_id == "agent-adapters" else AGENT_SYNC_PATH
+                if not allowed(_check_id, _allow_path, allows):
+                    hard.append(f"{_check_id}: generated model surfaces failed verification "
+                                f"({_detail[:900] or 'no diagnostic output'}; file-scoped "
+                                f"allow entry: {_check_id} {_allow_path})")
+            elif _agent_check is not None:
+                if not AGENT_SUCCESS.match(_agent_check.stdout.strip()) or _agent_check.stderr.strip():
+                    if not allowed("agent-adapter-check-broken", AGENT_SYNC_PATH, allows):
+                        hard.append("agent-adapter-check-broken: scripts/sync-agent-adapters returned "
+                                    f"success without the verification sentinel: expected "
+                                    f"{AGENT_SUCCESS.pattern!r}, got {_agent_check.stdout.strip()[:200]!r}"
+                                    + (f" with stderr {_agent_check.stderr.strip()[:200]!r}"
+                                       if _agent_check.stderr.strip() else "")
+                                    + "; if the sentinel wording changed deliberately, update "
+                                    f"AGENT_SUCCESS in scripts/repo-doctor ({_broken_allow})")
+                else:
+                    _behavior_ok, _behavior_detail = verify_agent_generator_behavior()
+                    if not _behavior_ok and not allowed(
+                        "agent-adapter-check-broken", AGENT_SYNC_PATH, allows
+                    ):
+                        hard.append("agent-adapter-check-broken: scripts/sync-agent-adapters "
+                                    f"failed an independent negative probe ({_behavior_detail}; "
+                                    f"{_broken_allow})")
+    # codex-parity: a guard wired on one host and not the other is a guard with a documented
+    # bypass, and the bypass is silent by construction. The unwired host starts, says nothing,
+    # and runs without the guard. Claude Code reads .claude/settings.json; Codex reads
+    # .codex/hooks.json plus .codex/agents/. Both hosts invoke the SAME scripts under
+    # .claude/hooks/, so there is one owner per guard and the only thing that can drift is the
+    # wiring. This check is that wiring's floor. Traces to the guardrail-rot hazard in
+    # ai/ERRORS.md: adding a guard to one host and forgetting the other is otherwise a clean
+    # commit. HARD in both modes for the same reason the agent-adapters check is HARD.
+    # Skipped for commits that predate the Codex layer: those are legitimately clean.
+    # Guarded on .claude/settings.json, never on anything inside .codex/, so deleting the Codex
+    # layer cannot delete the check that notices it is gone. A tree that never had a .codex/
+    # layer at all (Claude Code only) is left alone: parity is a property of two hosts.
+    # Known limits, stated rather than implied: matcher equivalence is NOT compared (the two
+    # hosts expose different tool names, so equal matchers would be wrong), and .claude/
+    # settings.local.json is gitignored and invisible here, same blind spot as sessionstart-mute.
+    def _codex_tracked(path):
+        if STAGED:
+            _r = subprocess.run(["git", "ls-files", "--", path],
+                                capture_output=True, text=True, cwd=ROOT)
+            return _r.returncode == 0 and bool(_r.stdout.strip())
+        return (ROOT / path).is_file()
+
+    def _codex_listdir(prefix, suffix):
+        if STAGED:
+            _r = subprocess.run(["git", "ls-files", "-z", "--", prefix],
+                                capture_output=True, text=True, cwd=ROOT)
+            _names = [p for p in _r.stdout.split("\0") if p] if _r.returncode == 0 else []
+        else:
+            _d = ROOT / prefix
+            _names = [f"{prefix}/{p.name}" for p in _d.iterdir() if p.is_file()] \
+                if _d.is_dir() else []
+        return sorted(Path(p).stem for p in _names if p.endswith(suffix))
+
+    def _codex_uncommented(cmd):
+        """Drop a shell comment so a commented-out guard stops reading as armed.
+
+        _SCRIPT_REF matches a script path anywhere in the command string, so
+        `# python3 .../deny-env-access.py  (disabled)` would count as wiring and the parity
+        diff would go quiet on a guard that cannot run. Deliberately simple: a leading `#`
+        kills the whole command, and an unquoted ` #` truncates. Quoting is not parsed, so a
+        `#` inside quotes truncates too, which can only ever make the check MORE likely to
+        report a missing guard. Safe direction, same posture as the guards themselves.
+        """
+        if not isinstance(cmd, str):
+            return ""
+        if cmd.lstrip().startswith("#"):
+            return ""
+        return re.split(r"\s#", cmd, maxsplit=1)[0]
+
+    def _codex_hook_commands(cfg, event):
+        _out = []
+        _blocks = (cfg.get("hooks") or {}).get(event) or []
+        if isinstance(_blocks, list):
+            for _blk in _blocks:
+                if not isinstance(_blk, dict):
+                    continue
+                for _h in _blk.get("hooks") or []:
+                    if isinstance(_h, dict) and _h.get("type") == "command" \
+                            and isinstance(_h.get("command"), str):
+                        _out.append(_h["command"])
+        return _out
+
+    _CODEX_HOOKS = ".codex/hooks.json"
+    _CODEX_CONFIG = ".codex/config.toml"
+    _CODEX_AGENTS = ".codex/agents"
+    _CLAUDE_AGENTS = ".claude/agents"
+    _SCRIPT_REF = re.compile(r"(?:\.claude/hooks|\.codex/hooks|scripts)/[A-Za-z0-9._-]+")
+    # Gated per COMMIT, not blanket-skipped on history scans: the pre-push range scan is the
+    # backstop a bypassed commit cannot outlive, and a blanket HISTORY_SCAN skip would make it
+    # check host-guard parity on exactly zero commits. Commits predating the Codex layer are
+    # skipped by asking whether THIS commit carries the layer, the same shape
+    # adapter_contract_present uses above.
+    _codex_layer_here = _codex_tracked(_CODEX_HOOKS) or _codex_tracked(_CODEX_CONFIG) \
+        or bool(_codex_listdir(_CODEX_AGENTS, ".toml"))
+    if _codex_layer_here and _codex_tracked(SETTINGS_JSON):
+        # Event floor, not the event set. The set actually compared is the union of every event
+        # either config uses, so a host adding an event cannot open a hole. The tuple survives
+        # only as a floor, so that dropping a wired event from both files at once still reports.
+        _CX_EVENT_FLOOR = ("SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop")
+        _claude_scripts, _codex_scripts, _cx_broken = set(), set(), []
+        _cc, _xc = {}, {}
+        try:
+            _parsed = json.loads(blob(SETTINGS_JSON).decode("utf-8", errors="replace"))
+            _cc = _parsed if isinstance(_parsed, dict) else {}
+        except (ValueError, AttributeError, TypeError) as _e:
+            _cx_broken.append((SETTINGS_JSON, f"{SETTINGS_JSON} did not parse as a hook config "
+                                              f"({type(_e).__name__})"))
+        _codex_hooks_present = _codex_tracked(_CODEX_HOOKS)
+        if _codex_hooks_present:
+            try:
+                _parsed = json.loads(blob(_CODEX_HOOKS).decode("utf-8", errors="replace"))
+                if not isinstance(_parsed, dict):
+                    raise TypeError("top level is not an object")
+                _xc = _parsed
+            except (ValueError, AttributeError, TypeError) as _e:
+                _cx_broken.append((_CODEX_HOOKS, f"{_CODEX_HOOKS} did not parse as a hook config "
+                                                 f"({type(_e).__name__}), so no Codex hook is "
+                                                 f"verified to run"))
+        _cx_events = sorted(
+            set(_CX_EVENT_FLOOR)
+            | {k for k in (_cc.get("hooks") or {}) if isinstance(k, str)}
+            | {k for k in (_xc.get("hooks") or {}) if isinstance(k, str)}
+        )
+        for _ev in _cx_events:
+            for _cmd in _codex_hook_commands(_cc, _ev):
+                _claude_scripts.update((_ev, m) for m in _SCRIPT_REF.findall(_codex_uncommented(_cmd)))
+        if not _codex_hooks_present:
+            if _claude_scripts:
+                _cx_broken.append((_CODEX_HOOKS,
+                                   f"{_CODEX_HOOKS} is missing, so a Codex session in this repo "
+                                   f"runs with none of the "
+                                   f"{len({s for _, s in _claude_scripts})} guard/report scripts "
+                                   f"{SETTINGS_JSON} wires"))
+        else:
+            for _ev in _cx_events:
+                for _cmd_raw in _codex_hook_commands(_xc, _ev):
+                    _cmd = _codex_uncommented(_cmd_raw)
+                    _codex_scripts.update((_ev, m) for m in _SCRIPT_REF.findall(_cmd))
+                    # A hook pointing at a script that is not there is a disabled guard that
+                    # still reads as configured.
+                    for _ref in _SCRIPT_REF.findall(_cmd):
+                        if not _codex_tracked(_ref):
+                            _cx_broken.append((_CODEX_HOOKS,
+                                               f"{_CODEX_HOOKS} {_ev} invokes {_ref}, which "
+                                               f"is not tracked in this tree"))
+                    # Same inversion as sessionstart-mute: without `|| true` a HARD tree
+                    # takes the host's error path and the findings never reach context.
+                    # Judged on the RAW command, because a trailing `# why` comment after
+                    # `|| true` is part of the shape being matched.
+                    if _ev == "SessionStart" and "/dev/null" not in _cmd_raw \
+                            and not re.search(r"(\|\|\s*true|;\s*true)\s*(#.*)?$", _cmd_raw) \
+                            and not allowed("sessionstart-mute", _CODEX_HOOKS, allows):
+                        soft.append(f"sessionstart-mute: the {_CODEX_HOOKS} SessionStart "
+                                    f"command `{_cmd_raw[:60]}` has no `|| true`, so on a HARD "
+                                    f"tree its findings never reach context")
+        # BOTH directions. A session run inside Codex that adds a guard edits the file that
+        # host reads, never touches .claude/settings.json, and every later Claude Code session
+        # runs without it. Claude Code is the primary host, so that direction is the damaging one.
+        for _missing, _have, _lack, _host in (
+            (_claude_scripts - _codex_scripts, SETTINGS_JSON, _CODEX_HOOKS, "Codex"),
+            (_codex_scripts - _claude_scripts, _CODEX_HOOKS, SETTINGS_JSON, "Claude Code"),
+        ):
+            for _ev, _script in sorted(_missing):
+                _cx_broken.append((_CODEX_HOOKS,
+                                   f"{_script} is wired on {_ev} in {_have} but on no {_ev} hook "
+                                   f"in {_lack}, so it does not run under {_host}"))
+        _claude_agents = _codex_listdir(_CLAUDE_AGENTS, ".md")
+        _codex_agents = _codex_listdir(_CODEX_AGENTS, ".toml")
+        for _gap, _have, _ext, _lack, _lext, _host in (
+            (set(_claude_agents) - set(_codex_agents),
+             _CLAUDE_AGENTS, "md", _CODEX_AGENTS, "toml", "Codex"),
+            (set(_codex_agents) - set(_claude_agents),
+             _CODEX_AGENTS, "toml", _CLAUDE_AGENTS, "md", "Claude Code"),
+        ):
+            for _missing in sorted(_gap):
+                _cx_broken.append((_CODEX_AGENTS,
+                                   f"subagent {_missing} exists at {_have}/{_missing}.{_ext} "
+                                   f"with no {_lack}/{_missing}.{_lext}, so a {_host} session "
+                                   f"cannot spawn a verifier the skills call mandatory"))
+        for _path, _msg in _cx_broken:
+            if not allowed("codex-parity", _path, allows):
+                hard.append(f"codex-parity: {_msg} (file-scoped allow entry: codex-parity {_path})")
+        if _claude_scripts and not _codex_tracked(_CODEX_CONFIG) \
+                and not allowed("codex-parity", _CODEX_CONFIG, allows):
+            soft.append(f"codex-parity: {_CODEX_CONFIG} is missing, so a Codex session inherits "
+                        f"user defaults for sandbox and network and every agent-hands script "
+                        f"costs an escalation prompt per call")
+        # codex-hooks-untrusted: wiring a hook is not arming it. Codex gates non-managed command
+        # hooks on a per-content-hash trust the OPERATOR grants interactively, stored outside the
+        # repo in the Codex home config. Until then it skips them, and `codex exec` says NOTHING:
+        # no prompt, no startup warning, no stderr line. So codex-parity's file-level checks can
+        # all pass while every guard is off, which is the exact gap this line closes. Soft and
+        # full-mode only by construction: the evidence lives on the machine, not in the tree, so
+        # it can never be a commit or push gate, and a clean clone on a new machine is
+        # legitimately untrusted rather than broken.
+        # Honest limit, stated rather than implied: Codex's hash scheme is internal, so this
+        # confirms only that SOME trust was recorded, never that it matches the current
+        # .codex/hooks.json. A hooks.json edited after trust was granted re-arms Codex's review
+        # and still reads as trusted here. Re-run the interactive step after any hooks.json change.
+        # `not HISTORY_SCAN` too: this reads the operator's Codex home, which is machine state,
+        # not a property of the commit being scanned.
+        if not STAGED and not HISTORY_SCAN and _codex_tracked(_CODEX_HOOKS) \
+                and not allowed("codex-hooks-untrusted", _CODEX_HOOKS, allows):
+            _codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+            _codex_user_config = _codex_home / "config.toml"
+            # No Codex home config means Codex has never run on this machine, so no Codex
+            # session can reach this tree unguarded. Quiet by design: an operator who only
+            # ever uses Claude Code should not read a Codex warning every session. The gap
+            # opens the first time Codex runs here, and that first run writes the config
+            # this branch then reads.
+            if _codex_user_config.is_file():
+                try:
+                    # Presence only. This file is never echoed: it carries the operator's model,
+                    # provider and project-trust settings and none of that belongs in doctor output.
+                    _armed = "hooks.state" in _codex_user_config.read_text(
+                        encoding="utf-8", errors="replace")
+                except OSError as _e:
+                    _armed = None
+                    soft.append(f"codex-hooks-untrusted: could not read {_codex_user_config} "
+                                f"({type(_e).__name__}), so hook trust is unverified")
+                if _armed is False:
+                    soft.append("codex-hooks-untrusted: no Codex hook trust is recorded on this "
+                                "machine, so a Codex session in this repo runs with NONE of the "
+                                "guards .codex/hooks.json wires, and `codex exec` reports none "
+                                "of that. Arm them once: run `codex` interactively at the repo "
+                                "root and answer the hook-review prompt with 'Trust all and "
+                                "continue'. Re-arm after any edit to .codex/hooks.json")
+    files = [f for f in git("diff", "--cached", "--name-only", "--diff-filter=d", "-z").split("\0") if f] \
+        if STAGED else [f for f in git("ls-files", "-z").split("\0") if f]
+    file_text = {}   # path -> decoded text (plain or office XML), reused by check 9
+    unscanned_archives = []   # real zips that are not validated office formats
+    zip_text_files = set()    # paths whose text came from an office payload
+
+    for f in files:
+        # 1. protected paths (case-insensitive: the FS is, so a bypass would be too)
+        if is_protected(f) and not allowed("protected-paths", f, allows):
+            hard.append(f"protected-paths: {f} is {'staged' if STAGED else 'tracked'} but must stay local-only")
+            continue
+        data = blob(f)
+        suffix = Path(f).suffix.lower()
+        # 2. secrets in text. THE DEFAULT IS TO DECODE. It used to be the other way round, and
+        # a filename decided the scanners' input universe: a suffix outside TEXT_EXT was
+        # never decoded and emitted NOTHING, so the PEM pattern could not fire on a .pem, a secret
+        # in a .svg or .plist was exempt, and the binary-text HARD that was meant to make skips
+        # loud sat INSIDE the TEXT_EXT branch, so it could never speak for the files that needed
+        # it. Measured: one PEM body written to 10 suffixes fired on 3 and was silent on 7.
+        # The ladder, and the order is the contract:
+        #   PK magic   -> office payloads validated and scanned as before; any OTHER archive is
+        #                 NAMED on unscanned-suffix rather than silently exempt. Its interior is
+        #                 deliberately NOT walked: only the office formats have a validated
+        #                 structure to walk, and a generic recursive walk feeds arbitrary
+        #                 compressed members (including nested archives) to the text scanners.
+        #                 Naming the file is the honest middle: the operator decides, and the
+        #                 skip is a decision rather than an oversight.
+        #   NUL bytes  -> HARD binary-text on a text suffix, silent ONLY for BINARY_EXT,
+        #                 soft unscanned-suffix for any other suffix
+        #   otherwise  -> decode and scan, whatever the suffix is
+        # TEXT_EXT survives only as a SEVERITY classifier for the NUL case, never as a gate.
+        text = None
+        if suffix in OFFICE_EXT and data.startswith(b"PK\x03\x04"):
+            ok, res = office_ok(data, suffix)
+            if ok:
+                text = res
+                zip_text_files.add(f)
+            else:
+                text = None   # magic was fine; the office payload is corrupt
+                if not allowed("office-xml", f, allows):
+                    hard.append(f"office-xml: {f} is not a valid {suffix} ({res})")
+        elif data.startswith(b"PK\x03\x04") and zipfile.is_zipfile(io.BytesIO(data)):
+            if not allowed("unscanned-suffix", f, allows):
+                unscanned_archives.append(f)
+        elif b"\0" in data:
+            if suffix in TEXT_EXT:
+                if not allowed("binary-text", f, allows):
+                    hard.append(f"binary-text: {f} carries a text suffix but holds NUL bytes, so the "
+                                f"secrets and tombstone scanners cannot read it (re-save it as UTF-8, "
+                                f"or give it its real binary extension)")
+            elif suffix not in BINARY_EXT and not allowed("unscanned-suffix", f, allows):
+                soft.append(f"unscanned-suffix: {f} holds NUL bytes under an unlisted suffix, so "
+                            f"nothing read it. Add the suffix to BINARY_EXT if it is genuinely "
+                            f"binary, so the exemption is a decision and not an oversight")
+        else:
+            text = data.decode("utf-8", errors="ignore")
+        if text is not None and not allowed("secrets", f, allows):
+            for pat in SECRET_PATTERNS:
+                m = pat.search(text)
+                if m:
+                    hard.append(f"secrets: {f} matches a secret shape near offset {m.start()} (pattern: {pat.pattern[:40]}…)")
+                    break
+        if text is not None:
+            file_text[f] = text
+        # 3b. machine-bound absolute paths in executable files (see MACHINE_PATH).
+        # HARD: the failure mode is silent cross-tree writes to live business data, and the
+        # 2026-07-29 row in ai/ERRORS.md is the trace. Text-only: `text` is None
+        # for anything that did not decode, and a binary under scripts/ has no business
+        # carrying a home path.
+        if text is not None and f.startswith(MACHINE_PATH_DIRS) \
+                and not allowed("machine-path", f, allows):
+            mm = MACHINE_PATH.search(text)
+            if mm:
+                hard.append(f"machine-path: {f} hardcodes the absolute path `{mm.group(0)}…`, "
+                            f"so it targets one machine's tree from any checkout. Derive the "
+                            f"root instead: `git rev-parse --show-toplevel`")
+        # 3. office/pdf magic bytes
+        magic = MAGIC.get(suffix)
+        if magic and data and not data.startswith(magic) and not allowed("office-magic", f, allows):
+            hard.append(f"office-magic: {f} does not start with expected {suffix} signature (fake file?)")
+
+    # 3b. money-stale (staged): SUMMARY.md is the cash authority; MONEY.md is its
+    # generated rollup. Committing a SUMMARY edit without regenerating MONEY.md ships a
+    # stale drift pair, so block it. Full-mode mtime warn lives in the soft-checks block.
+    if STAGED and SUMMARY_MD in files and MONEY_MD not in files \
+            and not allowed("money-stale", SUMMARY_MD, allows):
+        hard.append(f"money-stale: {SUMMARY_MD} staged without {MONEY_MD}, regenerate: scripts/money")
+
+    # 4. outputs <-> raw duplicates (basename+size prefilter, then md5)
+    import hashlib
+    raw_map = {}
+    # raw/ is gitignored and therefore structurally absent from a detached scan worktree, so
+    # this HARD gate could never fire in the push path it was cited as protecting.
+    raw_dir = LIVE_ROOT / "raw"
+    if raw_dir.is_dir():
+        for p in raw_dir.rglob("*"):
+            if p.is_file():
+                raw_map.setdefault((p.name, p.stat().st_size), p)
+    for f in files:
+        if f.startswith("outputs/"):
+            p = ROOT / f
+            if p.is_file():
+                twin = raw_map.get((p.name, p.stat().st_size))
+                if twin and hashlib.md5(p.read_bytes()).hexdigest() == hashlib.md5(twin.read_bytes()).hexdigest() \
+                        and not allowed("outputs-raw-dup", f, allows):
+                    hard.append(f"outputs-raw-dup: {f} is byte-identical to {twin.relative_to(LIVE_ROOT)} - keep one")
+
+    # 9. tombstones: retired values must not reappear un-bannered.
+    # HARD in curated scopes; soft in outputs/*.md and delivered office payloads, in BOTH
+    # modes. A `not STAGED` clause used to gate this: in the 2026-07-11 row in ai/ERRORS.md
+    # the dead price came out of a superseded proposal, an outputs/ file, so the check had
+    # been switched off in exactly the path where it would have been seen, which is the
+    # guardrail-rot shape hiding inside a scope decision.
+    # Note it WARNS at commit time, it does not block:
+    # an outputs/ hit is soft and repo-doctor exits 1 only on HARD. Office payloads are
+    # matched against extracted XML text: a dead price inside a generated proposal is the
+    # copy a client actually reads. The gate is `f not in file_text`, so a file whose bytes
+    # never decoded is skipped here; check 2 raises binary-text HARD on exactly those files,
+    # so that skip is loud rather than silent (verified by probe).
+    tombs = load_tombstones()
+    # The control announces its own absence. A missing, renamed or reformatted ledger returned an
+    # empty list and `if tombs:` skipped the whole check, so the repo's flagship ripple control
+    # could be switched off while every run reported clean. That is the guardrail-rot hazard in
+    # ai/ERRORS.md wearing the ledger as a costume. Soft, not HARD: a fresh clone with a
+    # legitimately empty table must not be unable to commit.
+    if not (ROOT / TOMB_FILE).is_file():
+        soft.append(f"tombstones-source: {TOMB_FILE} is not on disk, so the tombstone check "
+                    f"scanned nothing at all. Restore it or the ripple rule has no enforcement")
+    elif not tombs:
+        soft.append(f"tombstones-source: {TOMB_FILE} exists but parsed to ZERO rows, so the "
+                    f"tombstone check scanned nothing. Check the pipe-table shape")
+    _tsc = [lab for lab, ok in tomb_selfcheck() if not ok]
+    if _tsc:
+        soft.append("tombstone-selfcheck: the exemption rules FAILED their own cases ("
+                    + ", ".join(_tsc) + "), so tombstone findings this run cannot be trusted")
+    if tombs:
+        tomb_soft = []
+        for f in files:
+            if f.startswith("ai/") or f == TOMB_FILE or f not in file_text:
+                continue
+            office = f in zip_text_files
+            # Root-level tracked files matched NO scope arm and vanished silently, so a dead price
+            # in CLAUDE.md, the always-loaded contract, committed clean. Root .md files join the
+            # HARD scope: they are curated by definition.
+            is_hard = f.startswith(TOMB_HARD_PREFIXES) or ("/" not in f and f.lower().endswith(".md"))
+            is_soft = not is_hard and f.startswith("outputs/") and (office or f.lower().endswith(".md"))
+            if not (is_hard or is_soft):
+                continue
+            if office:
+                # One XML blob, no meaningful line structure, so the exemption is proximity-scoped
+                # (see tomb_exempt_at). Document-wide was the first cut and it regressed the
+                # check: one unrelated historical note anywhere in the payload exempted the
+                # whole document. A literal strike inside the payload is honoured too, which
+                # restores the earlier behaviour for that case.
+                txt = file_text[f]
+                spans = struck_spans(txt)
+                for s, rx in tombs:
+                    if allowed("tombstones", f, allows, token=s):
+                        continue
+                    hit = next((m for m in rx.finditer(txt)
+                                if not tomb_exempt_at(txt, m.start(), m.end(), spans)), None)
+                    if hit is not None:
+                        msg = (f"tombstones: {f} carries retired value \"{s}\" in its extracted "
+                               f"text with no supersession marker within "
+                               f"{TOMB_EXEMPT_WINDOW} chars, live authority in {TOMB_FILE}")
+                        (hard if is_hard else tomb_soft).append(msg)
+                        break
+                continue
+            body = file_text[f]
+            lines = body.splitlines()
+            if lines and TOMB_BANNER_EXACT.match(lines[0]):
+                continue  # the file declares itself historical, in the form doctrine prescribes
+            for i, ln in enumerate(lines, 1):
+                spans = struck_spans(ln)
+                for s, rx in tombs:
+                    # Token-scoped allow at the EMISSION site, and NO break across rows: an allow
+                    # entry for the first dead string on a line used to silence a live second one.
+                    if allowed("tombstones", f, allows, token=s):
+                        continue
+                    if any(not tomb_exempt_at(ln, m.start(), m.end(), spans)
+                           for m in rx.finditer(ln)):
+                        msg = (f"tombstones: {f}:{i} carries retired value \"{s}\" "
+                               f"un-bannered, live authority in {TOMB_FILE}")
+                        (hard if is_hard else tomb_soft).append(msg)
+        soft.extend(tomb_soft[:10])
+        if len(tomb_soft) > 10:
+            soft.append(f"tombstones: …and {len(tomb_soft) - 10} more in outputs/")
+
+    # 9b. dead-artifact-ref: a .md bannered DEAD/OVERTAKEN must not be referenced un-struck
+    # in live-sounding text. Soft in BOTH modes (heuristic; the SessionStart run surfaces it
+    # every session, same path as the other soft tier). Scope mirrors the tombstone arms plus
+    # outputs/, minus ai/ (the ledgers legitimately narrate dead artifacts), minus frozen
+    # logbook history (DEAD_REF_FROZEN, hard rule 4: it cannot legally be rewritten), minus
+    # office payloads and the dead files themselves. Traces to the "snapshot drift" hazard in
+    # ai/ERRORS.md.
+    dead_files = [f for f, txt in file_text.items()
+                  if f not in zip_text_files and f.lower().endswith(".md")
+                  and any(DEAD_BANNER.match(ln)
+                          for ln in txt.splitlines()[:DEAD_BANNER_HEAD_LINES])]
+    if dead_files:
+        dead_rx = [(df, re.compile(re.escape(df) + r"(?![A-Za-z0-9])")) for df in dead_files]
+        dref = []
+        for f, txt in file_text.items():
+            if f in zip_text_files or f.startswith("ai/") or f in dead_files \
+                    or f.startswith(DEAD_REF_FROZEN):
+                continue
+            if not (f.startswith(TOMB_HARD_PREFIXES) or f.startswith("outputs/")
+                    or ("/" not in f and f.lower().endswith(".md"))):
+                continue
+            strict = f == DEAD_REF_STRICT
+            for i, ln in enumerate(txt.splitlines(), 1):
+                spans = struck_spans(ln)
+                for df, rx in dead_rx:
+                    if allowed("dead-artifact-ref", f, allows, token=df):
+                        continue
+                    for m in rx.finditer(ln):
+                        if any(a <= m.start() < b or a < m.end() <= b for a, b in spans):
+                            continue
+                        if not strict:
+                            # The reference span itself is BLANKED from the marker window:
+                            # a dead file literally named "...-dead-draft.md" would otherwise
+                            # carry its own exemption everywhere (probe finding).
+                            near = (ln[max(0, m.start() - TOMB_EXEMPT_WINDOW):m.start()]
+                                    + " " + ln[m.end():m.end() + TOMB_EXEMPT_WINDOW])
+                            if DEAD_REF_MARKER.search(near):
+                                continue
+                        dref.append(
+                            f"dead-artifact-ref: {f}:{i} references {df}, which is bannered "
+                            f"dead, in live-sounding text"
+                            + (" (carry-over surface: strike or re-base it, a marker does "
+                               "not exempt here)" if strict
+                               else " with no historical marker nearby"))
+                        break
+        soft.extend(dref[:10])
+        if len(dref) > 10:
+            soft.append(f"dead-artifact-ref: …and {len(dref) - 10} more")
+
+    # 10. emdash-paste: banned em/en dashes inside send-ready copy blocks.
+    # Traces to the "House-style drift into send-ready copy" hazard in ai/ERRORS.md, not to an
+    # incident row: the em dash ban is house style, knowledge/voice/copy-rules.md says so plainly,
+    # and no row in the ledger claims otherwise. The hazard is what earns the check. Banned
+    # characters arrive by paste and by model output, a sweep strips them once, and a later
+    # hand-edit puts a few back into exactly the blocks that go out. A prose rule does not survive
+    # that cycle, so this is the mechanical floor under it.
+    # Scope is deliberately narrow: fenced blocks (the repo's paste-block convention) under
+    # the send trees only. Editorial prose, derivation notes and quoted third-party material
+    # live OUTSIDE the fences and are not the ban's surface.
+    # LIMITATION, stated: copy that never becomes a file under outputs/, a message drafted in chat
+    # and sent straight from there, is outside this check entirely. The line that covers that
+    # class is the one-line ban in CLAUDE.md's Voice rules.
+    # A block whose nearest heading marks it as a posted record is skipped: rewriting what
+    # actually went out to satisfy a checker would falsify the record.
+    SEND_TREES = ("outputs/content/", "outputs/outbound/")
+    # A heading exempts its blocks only if it is a POSTED RECORD. Two ways to qualify:
+    # an explicit archival marker, or a word-bounded shipped/posted/sent/published. A negation
+    # token disqualifies it ONLY when the negation comes BEFORE that marker on the line, which
+    # is where a negation can actually govern it: "## not shipped" and "### draft (shipped
+    # version pending)" are disqualified, while "## posted 2026-07-27, no replies yet" is a
+    # posted record whose trailing clause is about replies, not about whether it went out.
+    # The first cut used a `(?<!not )shipped` lookbehind, which defeated exactly one literal
+    # spelling: `## unshipped draft`, `## never shipped`, `## not yet shipped` all still matched
+    # bare `shipped` and silently exempted the block, which is the unshipped-draft copy this ban
+    # exists to protect. The second cut scanned negations line-wide and swung too far the other
+    # way, disqualifying genuine records on a trailing "yet".
+    HIST_MARK = re.compile(r"(?i)logged to|archive|superseded|~~")
+    POSTED_WORD = re.compile(r"(?i)\b(?:shipped|posted|sent|published)\b")
+    NOT_POSTED = re.compile(
+        r"(?i)\b(?:not|never|yet|draft|unshipped|unposted|unsent|unpublished)\b")
+    # Written as unicode escapes on purpose. The OS bans both dashes everywhere, including
+    # its own source, so the one check that hunts them must not carry a literal copy of
+    # either: U+2014 is the em dash, U+2013 the en dash.
+    DASH = re.compile("[\u2014\u2013]")
+    # Only a line-start fence with an optional info string toggles. `ln.lstrip()` counted
+    # indented fences (a nested example inside a block) as toggles, and any stray unpaired
+    # fence flipped the parity for the rest of the file, so real paste blocks after it read
+    # as prose and were skipped in silence.
+    FENCE = re.compile(r"^```\w*")
+
+    def posted_record(heading: str) -> bool:
+        marks = [m.start() for rx in (HIST_MARK, POSTED_WORD)
+                 for m in [rx.search(heading)] if m]
+        if not marks:
+            return False
+        neg = NOT_POSTED.search(heading)
+        return not (neg and neg.start() < min(marks))
+
+    def emdash_hits(rel: str, text: str):
+        lines = text.splitlines()
+        # Odd number of toggles = the file's fence structure is broken. Fail closed for this
+        # check's purpose: treat every line as fenced rather than let a desync exempt blocks.
+        desync = sum(1 for ln in lines if FENCE.match(ln)) % 2 == 1
+        out, heading, infence = [], "", False
+        for i, ln in enumerate(lines, 1):
+            if FENCE.match(ln):
+                infence = not infence
+                continue
+            if ln.startswith("#") and (desync or not infence):
+                heading = ln          # desync: parity is untrustworthy, so track headings
+                continue              # anyway rather than lose the posted-record exemption
+            if (infence or desync) and DASH.search(ln) and not posted_record(heading):
+                where = ("a file with unbalanced ``` fences, whole file treated as one paste "
+                         "block until the fences are fixed") if desync else "a paste block"
+                out.append(f"emdash-paste: {rel}:{i} banned em/en dash in {where}, "
+                           f"use a comma, period or single hyphen")
+        return out
+
+    if STAGED:
+        for f in files:
+            if f.startswith(SEND_TREES) and f.endswith(".md") \
+                    and not allowed("emdash-paste", f, allows):
+                hard.extend(emdash_hits(f, blob(f).decode("utf-8", errors="ignore")))
+    else:
+        vdash = []
+        for sub in SEND_TREES:
+            d = ROOT / sub.rstrip("/")
+            if not d.is_dir():
+                continue
+            for p in sorted(d.rglob("*.md")):
+                rel = str(p.relative_to(ROOT))
+                if allowed("emdash-paste", rel, allows):
+                    continue
+                vdash += emdash_hits(rel, p.read_text(errors="ignore"))
+        # HARD in full mode too. Staged-only HARD meant one
+        # `git commit --no-verify` published a banned-dash paste block permanently: full mode
+        # is the only pass that ever re-reads a file already committed, and it was filing the
+        # identical findings as soft, where exit status never looks. Measured before the
+        # promotion: 0 firing lines across the send trees, so the floor costs nothing.
+        hard.extend(vdash[:8])
+        if len(vdash) > 8:
+            hard.append(f"emdash-paste: …and {len(vdash) - 8} more")
+
+    # 4c. proposal sidecars conform to the scopeTrace schema they are checked against.
+    # Traced to a real defect, not speculation: the first backfill of this array
+    # shipped the wrong key (`scopeLine` for `line`), a two-value undated origin vocabulary
+    # instead of the documented dated three-value one, and an extra `billable` boolean that meant
+    # OPPOSITE things in the two files written by the same commit. The consequence was not
+    # cosmetic: `skills/proposal-creator/SKILL.md` step 6 and `price-attack` axis 6 both key off
+    # the literal string `already live, not billable`, so on every sidecar in the repo the
+    # check encoding the never-bill-remediation rule could not fire at all. A reviewer found
+    # it; no mechanical check could. This is that check. Soft, because a malformed sidecar
+    # should inform the drafter rather than block an unrelated commit, and because outputs/ is
+    # soft by convention. It reports the drafting defect; the human judgement about whether a
+    # trace is TRUE stays with axis 6, which is the half no regex can do.
+    _ORIGIN_OK = re.compile(
+        r"^(?:asked by client \d{4}-\d{2}-\d{2}(?:, extended by Sam)?"
+        r"|Sam added \d{4}-\d{2}-\d{2}"
+        r"|already live, not billable)$")
+    _TRACE_KEYS = {"line", "origin", "evidence"}
+    for _sc in sorted((ROOT / "outputs/proposals").glob("*-data.json")) \
+            if (ROOT / "outputs/proposals").is_dir() else []:
+        _rel = str(_sc.relative_to(ROOT))
+        if allowed("sidecar-trace", _rel, allows):
+            continue
+        try:
+            _j = json.loads(_sc.read_text(encoding="utf-8", errors="replace"))
+        except ValueError as e:
+            soft.append(f"sidecar-trace: {_rel} does not parse as JSON ({e}), so the generator "
+                        f"and every verification gate that reads it are blind to it")
+            continue
+        if not isinstance(_j, dict):
+            soft.append(f"sidecar-trace: {_rel} is not a JSON object")
+            continue
+        _tr = _j.get("scopeTrace")
+        if _tr is None:
+            soft.append(f"sidecar-trace: {_rel} has no `scopeTrace`, so `price-attack` axis 6 has "
+                        f"nothing to check and every scope line in it is unprovenanced "
+                        f"(schema: skills/proposal-creator/references/data-schema.md)")
+            continue
+        if not isinstance(_tr, list) or not _tr:
+            soft.append(f"sidecar-trace: {_rel} has an empty or non-list `scopeTrace`")
+            continue
+        _bad = []
+        for _i, _e in enumerate(_tr, 1):
+            if not isinstance(_e, dict):
+                _bad.append(f"entry {_i} is not an object")
+                continue
+            _extra = set(_e) - _TRACE_KEYS
+            _miss = _TRACE_KEYS - set(_e)
+            if _extra:
+                _bad.append(f"entry {_i} has undocumented key(s) {sorted(_extra)}")
+            if _miss:
+                _bad.append(f"entry {_i} is missing {sorted(_miss)}")
+            _o = _e.get("origin")
+            if isinstance(_o, str) and not _ORIGIN_OK.match(_o):
+                _bad.append(f"entry {_i} origin {_o!r} is outside the documented vocabulary")
+        if _bad:
+            soft.append(f"sidecar-trace: {_rel} scopeTrace does not match its schema: "
+                        + "; ".join(_bad[:4])
+                        + (f"; and {len(_bad) - 4} more" if len(_bad) > 4 else ""))
+
+    if unscanned_archives:
+        soft.append(f"unscanned-suffix: {len(unscanned_archives)} zip archive(s) are not validated "
+                    f"office formats, so their members were NOT scanned for secrets or retired "
+                    f"values: {', '.join(sorted(unscanned_archives))}. Named rather than silently "
+                    f"exempt. Walking arbitrary archive interiors was tried once and "
+                    f"reverted: it enlarges the single blob check 9 reads, so a banner in one "
+                    f"member exempts a dead value in another. Unpack and track the contents if a "
+                    f"bundle needs real coverage")
+
+    if not STAGED:
+        # 5. sandbox paths in skills
+        for p in (ROOT / "skills").rglob("SKILL.md"):
+            rel = str(p.relative_to(ROOT))
+            if SANDBOX.search(p.read_text(errors="ignore")) and not allowed("sandbox-paths", rel, allows):
+                soft.append(f"sandbox-paths: {rel} still teaches sandbox-only paths (/mnt/…, /home/claude)")
+        # 6. live state in outputs READMEs (any depth)
+        for p in (ROOT / "outputs").rglob("README.md"):
+            rel = str(p.relative_to(ROOT))
+            if LIVE_STATE.search(p.read_text(errors="ignore")) and not allowed("readme-live-state", rel, allows):
+                soft.append(f"readme-live-state: {rel} carries dated status lines, live truth belongs in knowledge/")
+        # 6b. invoice flow hard-depends on the local-only wire file existing. Expected on a
+        # fresh clone: the file is gitignored by design, so this line is the setup prompt.
+        if not HISTORY_SCAN and not (ROOT / "knowledge/business/invoices/PAYMENT-DETAILS.md").is_file():
+            soft.append("payment-details-missing: knowledge/business/invoices/PAYMENT-DETAILS.md not on disk, "
+                        "invoicing is broken. Copy PAYMENT-DETAILS.template.md next to it and fill "
+                        "in the real values, which stay local-only")
+        # 6c. expired pages: perishable research declares `Stale after: YYYY-MM-DD`
+        # (convention in CLAUDE.md; traces to the expiry face of the clock-blindness hazard
+        # in ai/ERRORS.md, where a page of web-sourced facts is true the week it is written
+        # and quietly false later, and nothing objects unless the page declared a shelf life)
+        # The parse is guarded like every other date parse in this file. It was not, and a
+        # digit-shaped but calendar-invalid value (`Stale after: 2026-02-30`) raised an
+        # uncaught ValueError that killed the WHOLE scan with a traceback. Via pre-push,
+        # which reads any nonzero exit as BLOCKED, one bad date in one page blocked every
+        # commit in the pushed range behind a stack trace: fails closed, but unactionable,
+        # and the file that caused it was never named. Same shape the allow-file parser was
+        # hardened against.
+        stale_re = re.compile(r"(?im)^\**\s*stale after:?\**\s*(\d{4}-\d{2}-\d{2})")
+        for base in ("knowledge", "outputs"):
+            for p in (ROOT / base).rglob("*.md"):
+                rel = str(p.relative_to(ROOT))
+                m = stale_re.search(p.read_text(errors="ignore"))
+                if not m or allowed("stale-page", rel, allows):
+                    continue
+                try:
+                    stale_d = date.fromisoformat(m.group(1))
+                except ValueError:
+                    soft.append(f"stale-page: {rel} declares `Stale after: {m.group(1)}`, "
+                                f"which is not a real calendar date, so this page can never "
+                                f"expire. Fix the value")
+                    continue
+                if stale_d < date.today():
+                    soft.append(f"stale-page: {rel} declared itself stale after {m.group(1)}, re-verify or supersede")
+        # 6d. dead pointers: backtick path refs to files that do not exist locally.
+        # Three repairs it took to make this usable. (1) `path/file.md:32` is the repo's own
+        # citation form (.claude/agents/client-sim.md instructs agents to use it), so the
+        # :LINE suffix is stripped before the existence test; without this the checker
+        # rejected the form the repo teaches. (2) One missing path cited N times is one
+        # warning, not N of the 10 slots. (3) A skill citing `scripts/x.js` means its OWN
+        # scripts/ folder, so the token resolves repo-root-relative first, then relative to
+        # the citing file.
+        # Scope widened past knowledge/: ai/ERRORS.md and ai/DECISIONS.md cite paths more
+        # densely per file than knowledge/ does, since a Control cell is mostly pointers, and
+        # none of those citations was ever validated. outputs/ is deliberately excluded,
+        # measured: the only hits were false positives.
+        topdirs = ("knowledge/", "outputs/", "raw/", "skills/", "templates/", "scripts/", "ai/", "personal/", ".agents/", ".claude/", ".github/", ".githooks/")
+        ref_re = re.compile(r"`([^`\n]+)`")
+        placeholder = re.compile(r"YYYY|NNN|Www|<[^>]+>")
+        line_suffix = re.compile(r":\d+(?:-\d+)?$")
+        # `.claude/worktrees/` is skipped: it holds live checkouts of OTHER concurrent
+        # sessions, whose in-progress files cite paths that exist in their tree and not in
+        # this one. Every such line is a phantom, and phantoms are not free: a handful of
+        # them once crowded the real findings past the dead[:10] cap (the run printed
+        # "…and 2 more" while worktree noise held half the slots) and roughly doubled the
+        # walk. HARD checks never saw them anyway, since those iterate `git ls-files`.
+        scan_roots = []
+        for sub in ("knowledge", "ai", "skills", "templates", ".agents", ".claude", ".github"):
+            scan_roots += [q for q in sorted((ROOT / sub).rglob("*.md"))
+                           if not str(q.relative_to(ROOT)).startswith(".claude/worktrees/")]
+        scan_roots.extend(ROOT / name for name in ("CLAUDE.md", "AGENTS.md", "GEMINI.md"))
+        dead, seen = [], set()
+        for p in scan_roots:
+            if not p.is_file():
+                continue
+            src = str(p.relative_to(ROOT))
+            for m in ref_re.finditer(p.read_text(errors="ignore")):
+                # A backticked span can be a COMMAND INVOCATION rather than a path.
+                # `scripts/backup-sensitive --verify --ask-pass` is how this repo cites a
+                # command to run, and testing the whole span for existence invented a dead
+                # pointer for a script sitting right there. That false positive already cost
+                # real damage: a session once split the span across two backticks purely to
+                # satisfy this checker, which is a checker training worse docs.
+                # The discriminator is deliberately NOT "contains whitespace". This repo
+                # cites real files whose names hold spaces (a generated proposal under
+                # outputs/proposals/ carries the client name and the project title in its
+                # filename), and argv[0]-splitting every span turned live paths into phantom
+                # dead pointers, naming a truncated path that was never written on disk.
+                # So: argv[0] is validated alone only
+                # when the span looks like a command, meaning a later segment is FLAG-shaped
+                # (a dash followed by a letter, so the bare " - " in a filename does not
+                # qualify) or argv[0] itself resolves to something that exists. Everything
+                # else keeps the whole-span behaviour. If argv[0] is not path-shaped the
+                # filters below drop the span, so `npm install docx` stays quiet.
+                raw = m.group(1).strip()
+                segs = raw.split()
+                head = segs[0] if segs else ""
+                looks_cmd = len(segs) > 1 and (
+                    any(re.match(r"--?[A-Za-z]", s) for s in segs[1:])
+                    or (ROOT / line_suffix.sub("", head)).exists())
+                tok = line_suffix.sub("", (head if looks_cmd else raw).rstrip(".,;:"))
+                if "*" in tok or "/" not in tok or not tok.startswith(topdirs) or placeholder.search(tok):
+                    continue
+                # allow entries are scoped check-id + file + TOKEN (`file::token-glob`), so
+                # exempting one planned-work citation no longer blanket-disables pointer
+                # checking for a whole file. The three ai/ ledgers the scan was widened to
+                # reach carry the repo's densest citations, and a file-wide entry switched
+                # exactly those back off.
+                if (ROOT / tok).exists() or (p.parent / tok).exists() \
+                        or allowed("dead-pointer", src, allows, token=tok):
+                    continue
+                # intentionally-dangling local-only pointers (gitignored) are declared OK in CLAUDE.md
+                # (0 = ignored, 1 = not ignored; anything else is a broken git and aborts)
+                _ci = subprocess.run(["git", "check-ignore", "-q", tok],
+                                     capture_output=True, text=True, cwd=ROOT)
+                if _ci.returncode not in (0, 1):
+                    _die(f"`git check-ignore -q {tok}` exited {_ci.returncode}: "
+                         f"{_ci.stderr.strip()[:200]}")
+                if _ci.returncode == 0:
+                    continue
+                if (src, tok) in seen:
+                    continue
+                seen.add((src, tok))
+                dead.append(f"dead-pointer: {src} cites `{tok}` which does not exist on disk")
+        soft.extend(dead[:10])
+        if len(dead) > 10:
+            soft.append(f"dead-pointer: …and {len(dead) - 10} more")
+        # 6e. horizon-blind: past-dated deadline-shaped prose scripts/horizon cannot see
+        # (its DUE_RE needs line-start `Due:`). Traces to the clock-blindness hazard in
+        # ai/ERRORS.md, which names this check: a commitment written as an ordinary sentence
+        # is invisible to the clock, and the OS reports zero overdue while a real date sails
+        # past.
+        due_line = re.compile(r"^[\s>*-]{0,6}\**\s*due:?\**\s*(\d{4}-\d{2}-\d{2})", re.I)
+        # (?<![\w-]) keeps dates embedded in filenames (…-2026-07-12.md) from matching
+        prose_due = re.compile(r"(?i)\b(?:due|deadline)\b\D{0,30}?(?<![\w-])(20\d{2}-\d{2}-\d{2})")
+        # A date the line resolves ON THE SPOT is a record, not a blind spot: the logbook
+        # writes "Due 2026-07-27 met a day early" inside a Closed bullet, and the check had no
+        # way to tell that from a live overdue item. Deliberately narrow: the verdict must be a
+        # verb that resolves a DEADLINE, and it must sit within RESOLVED_WINDOW chars after the
+        # date token. Bare adjectives were dropped on re-review: "completed"
+        # and "delivered" describe the WORK, not the deadline, so "due 2026-07-21 for the
+        # completed phase 1 scope" and "due 2026-07-22 delivered scope, client silent since"
+        # were being read as closed while they are exactly the class the hazard names.
+        # Negation-guarded in the same window, so "due 2026-07-20, not met" still fires.
+        # ~~strikethrough~~ stays the primary convention for resolving a deadline, but it
+        # resolves the tokens it WRAPS, not the whole line. Skipping any line holding a `~~`
+        # anywhere is what turned this safety net off for the exact shape it exists to catch:
+        # `~~**Due:** <old>~~ **Due:** <new>` (or the same with prose after the strike) was
+        # invisible to horizon's line-start anchor AND to this check AND therefore to
+        # clock-chronic, so one dead date hid a live overdue one from all three at once.
+        # Each prose match is now judged on whether the strike covers IT, and every match on
+        # the line is judged, not only the first that `search` happened to return.
+        RESOLVED_WINDOW = 25
+        resolved_near = re.compile(
+            r"(?i)\b(?:paid|met|resolved|cleared|closed|struck|done|waived)\b")
+        unresolved_near = re.compile(
+            r"(?i)\b(?:not|never|yet|un(?:met|paid|resolved)|missed|late|slipped|overdue)\b")
+        blind = []
+        for p in (ROOT / "knowledge").rglob("*.md"):
+            rel = str(p.relative_to(ROOT))
+            if "logbook/days/" in rel or p.name.startswith("extracted-") \
+                    or allowed("horizon-blind", rel, allows):
+                continue
+            lines = p.read_text(errors="ignore").splitlines()
+            # The live-Due set has to be EXACTLY what horizon sees, or this safety net
+            # reports a commitment as clock-blind that the clock is in fact carrying. A
+            # line-start-only match was narrower than horizon's grammar, so a date armed by the
+            # mid-line token of a rollover line (`~~**Due:** old~~ **Due:** new`) was absent
+            # from this set and every prose mention of it was falsely named blind.
+            if _CG:
+                proper = {dt for ln in lines for dt, _ in _CG.due_tokens(ln)}
+            else:
+                proper = {m.group(1) for ln in lines for m in [due_line.match(ln)] if m}
+            for i, ln in enumerate(lines, 1):
+                if due_line.match(ln):
+                    continue
+                spans = struck_spans(ln)
+                for m in prose_due.finditer(ln):
+                    # struck if the strike wraps the keyword OR the date token itself
+                    if any(a <= m.start() < b or a <= m.start(1) < b for a, b in spans):
+                        continue
+                    if m.group(1) in proper:
+                        continue
+                    tail = ln[m.end():m.end() + RESOLVED_WINDOW]
+                    if resolved_near.search(tail) and not unresolved_near.search(tail):
+                        continue
+                    try:
+                        d0 = date.fromisoformat(m.group(1))
+                    except ValueError:
+                        continue
+                    if d0 < date.today():
+                        blind.append(f"horizon-blind: {rel}:{i} past-dated deadline prose "
+                                     f"({m.group(1)}) with no matching line-start "
+                                     f"`**Due:**` line")
+        soft.extend(blind[:8])
+        if len(blind) > 8:
+            soft.append(f"horizon-blind: …and {len(blind) - 8} more")
+
+        # 6f. decision-undated: ai/DECISIONS.md's own rule is "no review date, no row". A
+        # calendar review needs YYYY-MM-DD; an explicit `Gate: <condition>` is also valid and
+        # scripts/horizon lists it under EVENT GATES. Any other Review-on cell can never fire,
+        # so the file's stated forcing function is dead on it. Traces to the clock-blindness
+        # hazard in ai/ERRORS.md, specifically the `clock-ignored` shape it names on the
+        # decisions ledger, and to the logbook's own line about it: a review gate that
+        # cannot fire is not a control. Soft, full mode only, on purpose: a HARD block
+        # here trains --no-verify, which is the escape-hatch decay the allow file exists to
+        # prevent. Rows whose Outcome opens with a verdict mark are closed and are skipped,
+        # mirroring horizon's own logic.
+        _dec = ROOT / "ai" / "DECISIONS.md"
+        if _dec.is_file() and not allowed("decision-undated", "ai/DECISIONS.md", allows):
+            _r = _o = None
+            for _n, _ln in enumerate(_dec.read_text(errors="ignore").splitlines(), 1):
+                if not _ln.strip().startswith("|"):
+                    continue
+                _cells = [c.strip() for c in _ln.strip().strip("|").split("|")]
+                if _r is None:
+                    for _i, _c in enumerate(_cells):
+                        if "review on" in _c.lower():
+                            _r = _i
+                        elif "outcome" in _c.lower():
+                            _o = _i
+                    continue
+                if all(set(c) <= set("-: ") for c in _cells) or _r >= len(_cells):
+                    continue
+                if _o is not None and _o < len(_cells) and _cells[_o].startswith(("✅", "❌")):
+                    continue
+                _review = _cells[_r]
+                if not re.search(r"\d{4}-\d{2}-\d{2}", _review) \
+                        and not re.fullmatch(r"(?i:gate:\s*.+)", _review):
+                    soft.append(f"decision-undated: ai/DECISIONS.md:{_n} Review-on cell "
+                                f"{_review!r} holds no YYYY-MM-DD or Gate trigger, so horizon "
+                                f"can never nag it")
+
+        # 6g. carryover-stale: the STATS.md carry-over bucket is the surface /plan reads for
+        # carried items, and its lines are point-in-time restatements of state the topic
+        # files own. When the bucket's own "as of" date falls behind the LOGBOOK cursor or
+        # behind a Closed bullet inside the section, closes have been appending without the
+        # /eod re-base step, and every un-struck line in it is an unverified snapshot.
+        # Traces to the "snapshot drift" hazard in ai/ERRORS.md: this bucket is the planning
+        # surface, so a line that outlives what it restated does not just sit there being
+        # wrong, it gets read as today's work and rides /plan onto the operator's calendar.
+        # Soft, full mode only, same reasoning as 6f: SessionStart surfaces it every session,
+        # which is the surface /plan runs from. Honest limit: a matching date proves only
+        # that the header was moved at the last close, not that the re-base actually read
+        # the owner files; the semantic half stays procedural (daily-log /eod step 4).
+        _stats_p = ROOT / "knowledge/ops/logbook/STATS.md"
+        _logbook_p = ROOT / "knowledge/ops/logbook/LOGBOOK.md"
+        if _stats_p.is_file() and not allowed("carryover-stale", "knowledge/ops/logbook/STATS.md", allows):
+            _stats_txt = _stats_p.read_text(errors="ignore")
+            _hdr = re.search(r"(?m)^##\s+Carry-over\b[^\n]*?(\d{4}-\d{2}-\d{2})", _stats_txt)
+            if not _hdr:
+                soft.append("carryover-stale: BLIND, the '## Carry-over' heading in "
+                            "knowledge/ops/logbook/STATS.md no longer carries an as-of "
+                            "YYYY-MM-DD date, so bucket freshness cannot be judged. "
+                            "Restore the date in the heading")
+            else:
+                _dates_bad = []
+                try:
+                    _hdr_d = date.fromisoformat(_hdr.group(1))
+                except ValueError:
+                    _hdr_d = None
+                    soft.append(f"carryover-stale: the carry-over heading date "
+                                f"{_hdr.group(1)!r} is not a real calendar date")
+                if _hdr_d is not None:
+                    _closed = []
+                    for _m in re.finditer(r"\*\*Closed (\d{4}-\d{2}-\d{2})", _stats_txt):
+                        try:
+                            _closed.append(date.fromisoformat(_m.group(1)))
+                        except ValueError:
+                            pass
+                    if _closed and max(_closed) > _hdr_d:
+                        _dates_bad.append(f"a Closed {max(_closed).isoformat()} bullet sits in the section")
+                    if _logbook_p.is_file():
+                        _cur = re.search(r"(?m)^(\d{4}-\d{2}-\d{2}) \(", _logbook_p.read_text(errors="ignore"))
+                        if _cur:
+                            try:
+                                _cur_d = date.fromisoformat(_cur.group(1))
+                                if _cur_d > _hdr_d:
+                                    _dates_bad.append(f"the LOGBOOK cursor stands at {_cur_d.isoformat()}")
+                            except ValueError:
+                                pass
+                    if _dates_bad:
+                        soft.append(f"carryover-stale: knowledge/ops/logbook/STATS.md's carry-over "
+                                    f"bucket is dated {_hdr_d.isoformat()} but "
+                                    + " and ".join(_dates_bad)
+                                    + ", so closes have appended without the /eod re-base step "
+                                    "and every un-struck carried line is an unverified snapshot "
+                                    "that /plan will read as current")
+
+        # 12. core-bloat: the always-loaded core must stay readable in one pass. Size and
+        # line length only, never content. Soft and full-mode only on the same reasoning
+        # 6f states: a HARD block here trains --no-verify, and the SessionStart doctor run
+        # surfaces soft lines every session anyway. Traces to the "bounded core that stops
+        # being readable in one pass" hazard in ai/ERRORS.md. The long-line half is the
+        # sharper of the two, and the hazard states why: verification here is grep-shaped,
+        # a grep that truncates inside an enormous single line returns a fragment, and a
+        # fragment reads as absence, so a quote that is really there can be reported missing.
+        core_p = ROOT / CORE_FILE
+        if core_p.is_file() and not allowed("core-bloat", CORE_FILE, allows):
+            core_raw = core_p.read_bytes()
+            if len(core_raw) > CORE_MAX_BYTES:
+                soft.append(f"core-bloat: {CORE_FILE} is {len(core_raw)} bytes (floor "
+                            f"{CORE_MAX_BYTES}), evict dated narrative to its owning topic "
+                            f"file and leave a pointer (knowledge/ops/os-roadmap.md)")
+            over = [i for i, ln in enumerate(
+                core_raw.decode("utf-8", errors="ignore").splitlines(), 1)
+                if len(ln) > CORE_MAX_LINE]
+            if over:
+                soft.append(f"core-bloat: {CORE_FILE} has {len(over)} line(s) over "
+                            f"{CORE_MAX_LINE} chars (first at :{over[0]}), one fact per "
+                            f"short line so a truncated grep cannot lie about it")
+
+        # 13. core-restatement: inside the core's pointer spans a pointer must name WHERE a
+        # number lives, never what it is. Traces to the 2026-07-11 row in ai/ERRORS.md, one
+        # owner per state fact: a figure inside a pointer block IS a copy of a number out of
+        # its owner file, which is the shape that put a dead price in a client message. Not
+        # the core-bloat hazard above, which is about read cost and grep truncation; these two
+        # checks share a file and nothing else. The tombstone check reaches this file too but
+        # only for values somebody already declared dead, so this is the floor under a
+        # restatement that is still current and still wrong to keep here.
+        # Narrow by design and honest about it: one currency-sign regex over two spans of
+        # one file, each with a hand-enumerated exemption list. It never opens the owner
+        # files, so it cannot judge whether a figure is correct, only that a pointer is
+        # carrying one; it is blind to a price written without a currency sign, to anything
+        # outside the two spans, and to a defect that happens to reuse an exempted literal.
+        # Per-finding allow entries use the figure as the ::token.
+        if core_p.is_file():
+            core_lines = core_p.read_text(encoding="utf-8", errors="replace").splitlines()
+            for _start, _end, _label, _owner, _exempt in CORE_POINTER_SPANS:
+                _cs = [i for i, ln in enumerate(core_lines) if ln.startswith(_start)]
+                _ce = [i for i, ln in enumerate(core_lines) if ln.startswith(_end)]
+                if not _cs or not _ce or _ce[0] <= _cs[0]:
+                    if not allowed("core-restatement", CORE_FILE, allows):
+                        soft.append(f"core-restatement: {CORE_FILE} headings {_start!r} .. "
+                                    f"{_end!r} no longer bound a span, so the {_label} is "
+                                    f"unchecked. Re-anchor it on the current headings or "
+                                    f"retire it, do not leave it green")
+                    continue
+                _seen = set()
+                for _i in range(_cs[0], _ce[0]):
+                    _hit = None
+                    # First NON-exempt figure on the line. `search` would have stopped at an
+                    # exempt one and skipped the rest of the line with it.
+                    for _m in CORE_MONEY.finditer(core_lines[_i]):
+                        if _m.group(0) in _exempt:
+                            _seen.add(_m.group(0))
+                            continue
+                        if allowed("core-restatement", CORE_FILE, allows, token=_m.group(0)):
+                            continue
+                        _hit = _m.group(0)
+                        break
+                    if _hit is None:
+                        continue
+                    soft.append(f"core-restatement: {CORE_FILE}:{_i + 1} carries the currency "
+                                f"figure {_hit!r} inside the {_label}. A pointer names where a "
+                                f"value lives, never what it is: cite {_owner} instead")
+                _stale = [t for t in _exempt if t not in _seen]
+                if _stale and not allowed("core-restatement", CORE_FILE, allows):
+                    soft.append(f"core-restatement: {CORE_FILE} {_label} exemption(s) "
+                                f"{', '.join(_stale)} no longer appear in the span, so the "
+                                f"doctrine they covered is gone. Prune them from "
+                                f"CORE_POINTER_SPANS before they silence a real restatement")
+
+        # 7. oldest dirty knowledge/ file modified >7 days ago (uncommitted drift)
+        import time
+        mtimes = []
+        for line in git("status", "--porcelain", "knowledge/").splitlines():
+            if not line.strip():
+                continue
+            path = line[3:].split(" -> ")[-1].strip().strip('"')  # rename -> take new path
+            fp = ROOT / path
+            if fp.is_file():  # skips deleted/missing entries
+                mtimes.append(fp.stat().st_mtime)
+        if mtimes and time.time() - min(mtimes) > 7 * 86400:
+            soft.append(f"stale-uncommitted: {len(mtimes)} dirty knowledge/ path(s), oldest modified "
+                        f">7 days ago, commit + push")
+        # 7b. money-drift (full): generated rollup older than its source authority.
+        # Its own check-id, NOT money-stale: that id belongs to the staged HARD dependency
+        # check above, on a different path. Sharing one id across two path-distinct
+        # mechanisms meant a single natural allow glob (`knowledge/business/*`, which
+        # fnmatch happily crosses "/" with) silenced both at once. Same reasoning that
+        # already gave money-monthstale its own id below.
+        # Judged on git state first, raw mtimes last. A fresh clone writes files in index
+        # order, so MONEY.md lands on disk a few milliseconds before SUMMARY.md and a plain
+        # mtime comparison condemned every clean checkout of this repo (the first-run
+        # promise in SETUP.md was false because of exactly this line). Two files that git
+        # holds clean carry no drift evidence in their mtimes at all: the question is
+        # whether SUMMARY.md's last commit came after MONEY.md's. mtimes decide only when
+        # both files carry uncommitted edits, which is the one case where they mean
+        # something. A real drift (SUMMARY.md edited, rollup not regenerated) still fires
+        # in every shape: dirty SUMMARY.md against a clean MONEY.md, both dirty with the
+        # rollup older, or a committed SUMMARY.md change that no later commit re-rolled.
+        money_p, summary_p = ROOT / MONEY_MD, ROOT / SUMMARY_MD
+        if money_p.is_file() and summary_p.is_file() \
+                and not HISTORY_SCAN and not allowed("money-drift", MONEY_MD, allows):
+            def _dirty(_path):
+                return bool(git("status", "--porcelain", "--", _path).strip())
+            _money_dirty, _summary_dirty = _dirty(MONEY_MD), _dirty(SUMMARY_MD)
+            _drift = False
+            if _summary_dirty and not _money_dirty:
+                _drift = True
+            elif _summary_dirty and _money_dirty:
+                _drift = money_p.stat().st_mtime < summary_p.stat().st_mtime
+            elif not _summary_dirty and not _money_dirty:
+                _mc = git("log", "-1", "--format=%H", "--", MONEY_MD).strip()
+                _sc = git("log", "-1", "--format=%H", "--", SUMMARY_MD).strip()
+                if _mc and _sc and _mc != _sc:
+                    _anc = subprocess.run(["git", "merge-base", "--is-ancestor", _mc, _sc],
+                                          capture_output=True, text=True, cwd=ROOT)
+                    _drift = _anc.returncode == 0
+            if _drift:
+                soft.append(f"money-drift: {MONEY_MD} is older than {SUMMARY_MD}, "
+                            f"regenerate: scripts/money")
+
+        # 7c. summary-openbalance: the cash register must not carry a current-sounding
+        # "nothing is open" claim while its own Register still holds an unpaid row.
+        # Traces to the "snapshot drift" hazard in ai/ERRORS.md: it mechanizes CLAUDE.md's
+        # status-banner convention in the one file that tracks live money, where a summary
+        # sentence that outlived its own table is a cash claim rather than a stale note.
+        # The invoice-number shape must match the prefix the ledger issues; change both
+        # together or this check quietly stops seeing any Register row at all.
+        if summary_p.is_file() and not allowed("summary-openbalance", SUMMARY_MD, allows):
+            stext = summary_p.read_text(encoding="utf-8", errors="replace")
+            slines = stext.splitlines()
+            open_rows = [ln for ln in slines
+                         if ln.strip().startswith("|") and re.search(r"NL-\d{4}-\w+", ln)
+                         and "~~" not in ln and not re.search(r"\*\*\s*PAID\b", ln)]
+            if open_rows:
+                claim_re = re.compile(r"zero open balance|no open balance|only open balance"
+                                      r"|is now collected|nothing outstanding", re.I)
+                for ln in slines:
+                    if "~~" in ln or "SUPERSEDED" in ln.upper():
+                        continue
+                    if claim_re.search(ln):
+                        soft.append(f"summary-openbalance: {SUMMARY_MD} carries an un-struck "
+                                    f"\"nothing is open\" claim while {len(open_rows)} Register "
+                                    f"row(s) are unpaid: {ln.strip()[:70]}")
+                        break
+
+        # 7d. money-monthstale: the trailing window is anchored to the current calendar month,
+        # so a MONEY.md generated in a prior month reports a window that has already moved.
+        # Its own check-id, NOT money-stale: one allow entry must not silence both the HARD
+        # staged drift check and this rollover warning, and the two must be greppable apart.
+        # Traces to the "snapshot drift" hazard in ai/ERRORS.md: a rollup generated in a prior
+        # calendar month still reads as the current window, so a stale income figure gets
+        # spoken to the operator as today's number.
+        if money_p.is_file() and not allowed("money-monthstale", MONEY_MD, allows):
+            gm = re.search(r"^>\s*Generated:\s*(\d{4})-(\d{2})",
+                           money_p.read_text(encoding="utf-8", errors="replace"), re.M)
+            if gm and (int(gm.group(1)), int(gm.group(2))) != (date.today().year, date.today().month):
+                soft.append(f"money-monthstale: {MONEY_MD} was generated in "
+                            f"{gm.group(1)}-{gm.group(2)} and the trailing 3-month window has "
+                            f"moved since. Regenerate: scripts/money")
+
+        # 8. hook wiring
+        # exit 1 from `config` means the key is unset, which is an answer, not a failure
+        hooks_path = git("config", "core.hooksPath", ok=(0, 1)).strip()
+        if hooks_path:
+            hp = Path(hooks_path)
+            if not hp.is_absolute():
+                hp = ROOT / hp
+            hooks_wired = hp.resolve() == (ROOT / ".githooks").resolve()
+        else:
+            hooks_wired = False
+        if not hooks_wired:
+            soft.append("hooks-unwired: run `git config core.hooksPath .githooks` (one-time per clone)")
+
+        # 8b. A SessionStart hook must not swallow its own findings.
+        # repo-doctor writes findings to STDOUT and exits 1 on a HARD tree. The harness adds a
+        # SessionStart hook's stdout to session context only when it exits 0, and on a non-zero
+        # exit it surfaces STDERR, which repo-doctor leaves empty. So a command with no
+        # `|| true` inverts the surface exactly backwards: a tree with only soft warnings
+        # reports everything, a tree with HARD violations reports nothing. Traces to the
+        # guardrail-rot hazard in ai/ERRORS.md, which names this check: strip the `|| true`
+        # believing it un-swallows an exit code and the loud case goes quiet while every run
+        # still looks configured. It matters more than it looks, because
+        # several soft checks in this file justify their whole tier on "the SessionStart run
+        # surfaces soft lines every session anyway", and that stripped `|| true` made the
+        # sentence false.
+        # Guarded on CLAUDE.md rather than on scripts/repo-doctor, because guarding a check on
+        # the file it lives in is self-referential and can never fire from a fixture root.
+        # Known limits, stated so nobody reads this as full coverage: .claude/settings.local.json
+        # is gitignored, takes precedence, and is invisible here; and the walk is matcher-blind.
+        if not HISTORY_SCAN and (ROOT / "CLAUDE.md").is_file() \
+                and not allowed("sessionstart-mute", SETTINGS_JSON, allows):
+            _sp = ROOT / SETTINGS_JSON
+            if not _sp.is_file():
+                soft.append(f"sessionstart-mute: {SETTINGS_JSON} absent, so no SessionStart scan "
+                            f"runs and the soft tier has no delivery surface at all")
+            else:
+                try:
+                    _cfg = json.loads(_sp.read_text(encoding="utf-8", errors="replace"))
+                    if not isinstance(_cfg, dict):
+                        raise TypeError("top level is not an object")
+                    _cmds = []
+                    for _blk in _cfg.get("hooks", {}).get("SessionStart", []):
+                        for _h in _blk.get("hooks", []):
+                            if _h.get("type") == "command" and _h.get("command"):
+                                _cmds.append(_h["command"])
+                    if not _cmds:
+                        soft.append(f"sessionstart-mute: {SETTINGS_JSON} wires no SessionStart "
+                                    f"command, so soft findings reach nobody")
+                    for _c in _cmds:
+                        if "scripts/" not in _c:
+                            continue
+                        _name = _c.split("scripts/")[1].split('"')[0].split()[0]
+                        if "/dev/null" in _c:
+                            soft.append(f"sessionstart-mute: the SessionStart `{_name}` command "
+                                        f"discards its output to /dev/null, so its findings "
+                                        f"reach nobody")
+                        elif not re.search(r"(\|\|\s*true|;\s*true)\s*(#.*)?$", _c):
+                            soft.append(f"sessionstart-mute: the SessionStart `{_name}` command "
+                                        f"has no `|| true`, so on a HARD tree the harness takes "
+                                        f"the error path and its findings never reach context. "
+                                        f"Append `2>&1 || true`")
+                except (ValueError, AttributeError, TypeError) as e:
+                    soft.append(f"sessionstart-mute: {SETTINGS_JSON} did not parse as a hook "
+                                f"config ({type(e).__name__}), so the session-start scan cannot "
+                                f"be verified to run")
+
+    # 11. clock escalation: a chronically overdue commitment reaches the pre-commit surface.
+    # Runs in BOTH modes on purpose: soft checks are otherwise full-mode only, and the commit
+    # is where the operator actually is. Never blocks, because horizon's contract is that it
+    # informs and never blocks. Measured cost: `horizon --chronic` is a fraction of a second
+    # against a repo-doctor run of a couple of seconds. Traces to the clock-blindness hazard
+    # in ai/ERRORS.md, which names clock-chronic as one of its controls: a date nobody moves
+    # ages quietly unless something surfaces it where the operator actually is.
+    # Four things this block refuses to do silently, because a check licensed by a
+    # clock-blindness hazard that fails quietly IS the hazard:
+    #   (1) `--root` is passed explicitly, so the subprocess never re-derives the root from
+    #       git and can never disagree with its parent about which tree it is scanning.
+    #   (2) `returncode` is inspected. A broken, renamed or syntax-error horizon says so on
+    #       its own soft line naming the exit code, instead of contributing empty stdout.
+    #   (3) the `elif` separates a FIXTURE root from ROT. In the scratch-repo pattern
+    #       repo-doctor is invoked by absolute path from OUTSIDE the scratch repo, so
+    #       ROOT/scripts/repo-doctor does not exist either and the block is a documented
+    #       silent no-op. In a tree that does carry repo-doctor, a missing horizon is rot
+    #       and is named.
+    #   (4) the subprocess is bounded by a timeout. It runs in BOTH modes, so a horizon that
+    #       hangs (a stuck NFS mount under knowledge/, a pathological regex) would hang every
+    #       commit AND every push with no output at all. Expiry is a loud soft line.
+    # TWO check-ids, deliberately. `clock-chronic` silences the FINDINGS (chronic-overdue
+    # noise the operator may want quiet for a week). `clock-horizon-broken` is guardrail rot:
+    # missing, crashed, or hung. One id for both meant a single allow entry written to quiet the
+    # nagging also blinded the repo to horizon being deleted, which is the guardrail-rot
+    # hazard in ai/ERRORS.md wearing the allow file as a costume. Allow keys match exactly,
+    # so separate ids stay separate.
+    # A grammar that would not load is guardrail rot: this file degrades to a local mirror and
+    # horizon-blind narrows, so it must announce itself. Both modes, because the staged surface
+    # is where the operator actually is, and soft because repo-doctor never dies over a clock
+    # problem.
+    if _CG_ERR:
+        soft.append(f"clock-horizon-broken: {_CG_ERR}. struck_spans fell back to repo-doctor's "
+                    f"local mirror and horizon-blind is running on the narrower line-start set")
+    CLOCK_TIMEOUT_S = 20
+    _hz = ROOT / "scripts" / "horizon"
+    if _hz.is_file():
+        _chron = _timeout = None
+        try:
+            _chron = subprocess.run([sys.executable, str(_hz), "--chronic", "--root", str(ROOT)],
+                                    capture_output=True, text=True, cwd=str(ROOT),
+                                    timeout=CLOCK_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _timeout = True
+        if _timeout and not allowed("clock-horizon-broken", "scripts/horizon", allows):
+            soft.append(f"clock-horizon-broken: scripts/horizon --chronic did not finish "
+                        f"within {CLOCK_TIMEOUT_S}s and was killed, so the clock escalation "
+                        f"is not running (it also just cost this commit {CLOCK_TIMEOUT_S}s)")
+        elif _chron is not None and _chron.returncode != 0:
+            # Last stderr line, ANSI-stripped: python colourizes tracebacks even when
+            # stderr is a pipe, and raw escape codes in a soft line are unreadable the
+            # moment this output is redirected to a file or a hook log.
+            _err = re.sub(r"\x1b\[[0-9;]*m", "", _chron.stderr).strip().splitlines()
+            if not allowed("clock-horizon-broken", "scripts/horizon", allows):
+                soft.append(f"clock-horizon-broken: scripts/horizon --chronic exited "
+                            f"{_chron.returncode}, so the clock escalation is not running "
+                            f"({_err[-1][:120] if _err else 'no stderr'})")
+        elif _chron is not None and not allowed("clock-chronic", "scripts/horizon", allows):
+            # NESTED under the success branch on purpose. As a sibling of the returncode
+            # test, the partial stdout of a CRASHED horizon was appended as findings next to
+            # the line saying horizon had crashed: half a truncated report presented as the
+            # clock's verdict. And the prefix is now required, so only horizon's declared
+            # machine-readable line is trusted; a stray print or a debug echo is not
+            # laundered into a repo-doctor finding.
+            for _ln in _chron.stdout.splitlines():
+                if _ln.strip().startswith("clock-chronic:"):
+                    soft.append(_ln.strip())
+    elif (ROOT / "scripts" / "repo-doctor").is_file() \
+            and not allowed("clock-horizon-broken", "scripts/horizon", allows):
+        soft.append("clock-horizon-broken: scripts/horizon is missing, so the clock "
+                    "escalation is not running")
+
+    for v in hard:
+        print(f"HARD  {v}")
+    for v in soft:
+        print(f"soft  {v}")
+    if not hard and not soft:
+        print("repo-doctor: clean")
+    elif not hard:
+        print(f"repo-doctor: {len(soft)} soft warning(s), no hard violations")
+    else:
+        # Name the bypass that actually applies to the caller. The one-size message told a
+        # blocked PUSH that its escape hatch was "--no-verify", which reads as
+        # `git commit --no-verify` and does nothing at push time: the enforcement layer was
+        # misdescribing its own escape hatch, the exact failure the pre-push work fixed.
+        gate = ("commit blocked (escape hatch: `git commit --no-verify` skips this staged run "
+                "only; the pre-push full scan still sees it, so pair it with a "
+                ".repo-doctor-allow entry)") if STAGED else \
+               ("blocked (escape hatch: `git push --no-verify`, which skips the ENTIRE pre-push "
+                "scan of every commit in the pushed range, not just this finding, so pair it "
+                "with a .repo-doctor-allow entry)")
+        print(f"repo-doctor: {len(hard)} HARD violation(s), {gate}")
+    return 1 if hard else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

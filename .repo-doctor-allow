@@ -1,0 +1,31 @@
+# repo-doctor exceptions. One entry per line, blank lines and #-comments ignored:
+#
+#   <check-id> <path-glob>[::<token-glob>] reason=<text> expires=YYYY-MM-DD
+#
+# The check-id matches EXACTLY, never as a glob, so an entry can never widen itself into
+# checks it was not written for. The path is matched as a glob. The optional ::<token-glob>
+# narrows an entry to ONE finding inside a file (dead-pointer uses it) rather than switching
+# the check off for the whole file. Scope every entry to the occurrence, give it a real
+# reason, and delete it the moment the underlying thing is fixed.
+#
+# expires= is mandatory and may not sit more than 90 days out. An expired entry is itself a
+# HARD violation, so a forgotten exception fails loudly instead of quietly living forever.
+# A malformed line is one HARD allow-syntax line and is skipped, so a single typo cannot
+# switch the scanner off for everything below it.
+#
+# WHERE THIS FILE IS READ FROM: the pushing checkout, never the commit being scanned. The
+# pre-push hook materialises each pushed commit in a throwaway worktree and judges it with
+# THIS file and THIS scripts/repo-doctor. Two consequences worth knowing before you need
+# them. A commit made while the checker was weak cannot approve itself, because it is judged
+# by today's rules. And an entry added in a LATER commit does clear an older commit in the
+# same push range, which is the remedy when a tightened check retroactively condemns
+# something an unpushed commit carried legitimately. Keep such an entry occurrence-scoped
+# and short-dated, and retire it once the range is on the remote.
+#
+# `git push --no-verify` is the strictly worse tool: it excuses nothing and skips the scan
+# of every commit in the range. An allow entry is a documented, dated, reviewable exception.
+# Skipping the hook is none of those.
+#
+# Start empty. Stay empty for as long as you can. Example, deliberately commented out:
+#
+# dead-pointer knowledge/ops/os-roadmap.md::scripts/check reason=planned pass-3 work, not rot expires=2026-11-01

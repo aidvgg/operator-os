@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""li-fetch: pull a public LinkedIn profile via Bright Data's dataset scrape API.
+
+Read-only agent hands. It fetches one public profile and prints a digest. It never
+connects, messages, endorses or follows.
+
+Provider-side data: Bright Data's infrastructure makes the requests, no cookies and no
+session, so the operator's own LinkedIn account is never the actor. LinkedIn punishes
+automation on the account that performs it, which is exactly why the account performs
+none of this.
+
+Usage:
+  scripts/li-fetch <profile-url-or-slug> [--json] [--timeout S]
+
+  <profile-url-or-slug>  full linkedin.com/in/... URL or just the slug. Required, and
+                         there is deliberately no default profile.
+  --json                 raw JSON record instead of the text digest
+  --timeout S            max seconds to wait if Bright Data goes async (default 300)
+
+Auth: BRIGHTDATA_API_KEY, from the environment first, else from the gitignored env file
+at the repo root (copy .env.example to start). The key is read inside this process and
+never printed. No AI tool may read or echo that file; the deny rules in
+.claude/settings.json and .claude/hooks/deny-env-access.py enforce it. A missing key is a
+loud failure, never a silent empty result.
+
+Flow: synchronous scrape endpoint; Bright Data holds the request up to about a minute.
+On HTTP 202 it hands back a snapshot_id and this script polls until ready.
+
+FAILURE CONTRACT. Every failure leaves here as one line naming the operation and the
+cause, plus a non-zero exit. Never a traceback. An agent calls this script and reads its
+output, and a stack trace tells that reader nothing about whether to retry, to fix a key
+or to give up. A timeout, a dropped connection and a provider-side 5xx or 429 are retried
+a bounded number of times with backoff, and each retry says so with its count. A 4xx, a
+non-JSON body and an empty body are never retried: none of them gets better on a second
+look, and an empty body in particular must never be read as a thin profile.
+"""
+
+import json
+import re
+import socket
+import ssl
+from datetime import datetime, timezone
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+DATASET_ID = "gd_l1viktl72bvl7bjuj0"  # Bright Data: LinkedIn people profiles, collect by URL
+BASE = "https://api.brightdata.com/datasets/v3"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def tls_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    for cafile in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
+        if Path(cafile).exists():
+            return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
+CTX = tls_context()
+
+
+def load_key(name):
+    """Return one API key's value, or None. Environment first, then the gitignored file.
+
+    Same discipline as scripts/x-fetch: the secrets file is opened here and nowhere else,
+    only the single matching value leaves this function, and the filename is assembled at
+    call time rather than written as one literal so a grep for the secrets file does not
+    land on a ready-made reader.
+    """
+    import os
+    if os.environ.get(name):
+        return os.environ[name].strip()
+    env_file = REPO_ROOT / (".env" + ".local")
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith(name + "="):
+                val = line.split("=", 1)[1].strip()
+                if val:
+                    return val
+    return None
+
+
+# ------------------------------------------------------------------- transport
+
+# This block exists because five ordinary failures used to leave this script as a Python
+# traceback: a read timeout, a connection reset, a 200 whose body is not JSON, a 200 with
+# an empty body, and any other socket-level error. Only HTTPError and URLError were
+# caught, and neither of those covers a socket that dies mid-read. A traceback is not a
+# result an agent can act on, so every failure now exits through fail() with one line.
+
+NET_RETRIES = 3               # bounded. never retry forever, never retry silently
+NET_BACKOFF = (2, 5, 10)      # seconds before retry 1, 2, 3
+RETRY_STATUS = (429, 500, 502, 503, 504)
+
+
+class _Retry(Exception):
+    """Internal: a failure worth one more attempt. Never escapes request()."""
+
+
+def fail(msg):
+    """Exit non-zero with exactly one line. Every failure path in this script ends here."""
+    sys.exit(f"li-fetch: {msg}")
+
+
+def _attempt(req, op, timeout):
+    """One round trip -> (status, body text). Raises _Retry, or exits through fail().
+
+    The except order matters and is not alphabetical: HTTPError is a subclass of URLError,
+    which is a subclass of OSError, while a read timeout and a connection reset are OSError
+    subclasses that are NOT URLError. Catching URLError alone is exactly how the timeout
+    and the reset used to escape.
+    """
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            fail("Bright Data rejected the key on %s (HTTP %d). Check BRIGHTDATA_API_KEY "
+                 "in the environment or in the gitignored env file at the repo root. "
+                 "Retrying will not help." % (op, e.code))
+        if e.code == 202:
+            # Kept for an opener that surfaces 202 as an error. The default opener returns
+            # it as an ordinary response above, and main() branches on the status either way.
+            return 202, e.read().decode("utf-8", "replace")
+        if e.code in RETRY_STATUS:
+            raise _Retry(f"HTTP {e.code}")
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except OSError:
+            pass
+        fail(f"Bright Data HTTP {e.code} on {op}. Not retried, a {e.code} repeats. {detail}")
+    except (socket.timeout, TimeoutError):
+        raise _Retry(f"read timed out after {timeout}s")
+    except ConnectionError as e:
+        raise _Retry(f"connection dropped: {e}")
+    except urllib.error.URLError as e:
+        # URLError wraps connect-time failures, so a timeout or a reset can arrive wrapped.
+        # Classify on the wrapped reason, not on the wrapper.
+        if isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
+            raise _Retry(f"connect failed: {e.reason}")
+        fail(f"Bright Data network error on {op}: {e.reason}. Check connectivity or DNS.")
+    except OSError as e:
+        # TLS handshake failures and anything else socket-level. Named rather than dumped.
+        fail(f"Bright Data transport error on {op}: {type(e).__name__}: {e}")
+
+
+def request(method, url, key, body=None, timeout=90, op=None):
+    """One request with a bounded, announced retry -> (status, body text).
+
+    Announcing the retry matters as much as bounding it: a silent retry turns a long wait
+    into an unexplained one, and the reader cannot tell a slow provider from a stuck script.
+    """
+    op = op or f"{method} {urllib.parse.urlsplit(url).path}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method=method,
+    )
+    for attempt in range(NET_RETRIES + 1):
+        try:
+            status, text = _attempt(req, op, timeout)
+        except _Retry as r:
+            if attempt >= NET_RETRIES:
+                fail(f"{op} failed after {NET_RETRIES} retries: {r}. Transient by nature, "
+                     "so retry the call later.")
+            delay = NET_BACKOFF[attempt]
+            print(f"li-fetch: {op}: {r}, retry {attempt + 1} of {NET_RETRIES} in {delay}s",
+                  file=sys.stderr)
+            time.sleep(delay)
+            continue
+        if attempt:
+            print(f"li-fetch: {op} succeeded after {attempt} "
+                  f"retr{'y' if attempt == 1 else 'ies'}", file=sys.stderr)
+        return status, text
+
+
+def decode_json(text, op, expect=(dict, list)):
+    """Body text -> JSON, or one line saying what came back instead.
+
+    The empty-body case is called out separately from the decode case on purpose. An empty
+    200 is the failure most likely to be misread downstream as "this profile is thin",
+    which is the exact lie this tool must never tell.
+    """
+    body = (text or "").strip()
+    if not body:
+        fail(f"Bright Data answered with an EMPTY body on {op}. That is a provider fault, "
+             "not a thin or dead profile, so do not rule on the profile from it.")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as e:
+        fail(f"Bright Data answered with a non-JSON body on {op} ({e.msg} at char {e.pos}): "
+             f"{body[:80]!r}. Not retried, a decode fault repeats.")
+    if not isinstance(data, expect):
+        fail(f"Bright Data answered with JSON {type(data).__name__} on {op}, expected "
+             f"{' or '.join(t.__name__ for t in expect)}: {body[:80]!r}")
+    return data
+
+
+def normalize_url(raw):
+    raw = raw.strip()
+    if "linkedin.com" in raw:
+        raw = raw.split("?")[0]
+        if not raw.startswith("http"):
+            raw = "https://" + raw.lstrip("/")
+        if "/in/" not in raw:
+            sys.exit("li-fetch: expected a person profile URL (linkedin.com/in/...). Company pages are not wired.")
+        return raw
+    slug = raw.strip("/@ ")
+    if slug.startswith("in/"):
+        slug = slug[3:]
+    return f"https://www.linkedin.com/in/{slug.strip('/')}/"
+
+
+def poll_snapshot(snapshot_id, key, deadline):
+    budget = max(0, int(deadline - time.time()))
+    while time.time() < deadline:
+        _, text = request("GET", f"{BASE}/progress/{snapshot_id}", key, timeout=30,
+                          op="progress poll")
+        state = decode_json(text, "progress poll", expect=(dict,)).get("status")
+        if state == "ready":
+            _, text = request("GET", f"{BASE}/snapshot/{snapshot_id}?format=json", key,
+                              timeout=60, op="snapshot fetch")
+            return decode_json(text, "snapshot fetch")
+        if state == "failed":
+            fail(f"Bright Data snapshot {snapshot_id} failed")
+        time.sleep(5)
+    fail(f"gave up after {budget}s of polling for snapshot {snapshot_id}; retry, or raise "
+         "--timeout")
+
+
+def records_from(payload):
+    if isinstance(payload, dict):
+        payload = [payload]
+    recs = [r for r in payload if isinstance(r, dict) and not r.get("error")]
+    errs = [r for r in payload if isinstance(r, dict) and r.get("error")]
+    if not recs and errs:
+        sys.exit(f"li-fetch: Bright Data returned only errors: {json.dumps(errs[:2])[:300]}")
+    if not recs:
+        sys.exit("li-fetch: empty result (dead URL or private profile)")
+    return recs
+
+
+def fmt_span(item):
+    title = item.get("title") or item.get("degree") or "?"
+    org = item.get("company") or item.get("subtitle") or item.get("institute") or ""
+    start = item.get("start_date") or ""
+    end = item.get("end_date") or ""
+    dates = f" ({start} - {end})" if (start or end) else ""
+    return f"  - {title}" + (f" @ {org}" if org else "") + dates
+
+
+def company_of(rec):
+    cc = rec.get("current_company")
+    if isinstance(cc, dict):
+        return cc.get("name") or cc.get("title") or rec.get("current_company_name") or "-"
+    return cc or rec.get("current_company_name") or "-"
+
+
+def recent_activity(rec):
+    """Most recent engagement dates. This is the DORMANCY read the prospect gate asks for
+    (outputs/outbound/prospect-gate.md), and it is NOT the `posts` array: `posts` holds
+    authored articles that can be years old while the account is active daily. Reading
+    posts as the activity signal gets the dormancy call backwards."""
+    acts = rec.get("activity")
+    if not isinstance(acts, list) or not acts:
+        return []
+    out = []
+    for a in acts[:6]:
+        if not isinstance(a, dict):
+            continue
+        what = re.sub(r"\s+", " ", (a.get("interaction") or "")).strip()
+        link = a.get("link") or ""
+        # LinkedIn embeds a millisecond timestamp in the first 41 bits of the activity id.
+        m = re.search(r"(?:activity|ugcPost)[-:](\d{19})", link)
+        when = ""
+        if m:
+            try:
+                ts = (int(m.group(1)) >> 22) / 1000
+                when = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+            except Exception:
+                when = ""
+        out.append(f"{when or '?'}  {what[:70]}")
+    return out
+
+
+# Bright Data's own exit node leaks into `url`'s country subdomain: the same profile comes
+# back as jp./in./uk.linkedin.com across successive calls. Canonicalize it so nothing
+# downstream reads the proxy's country as the prospect's location.
+#
+# This lives out here rather than inline in the digest's f-string for two reasons, both
+# found by running it. A backslash inside an f-string expression is a SyntaxError before
+# Python 3.12, so this file did not parse at all on an older interpreter. And the pattern's
+# backslashes had been doubled, which made it match a literal backslash: on the versions
+# where it did parse, the scrub silently did nothing and the proxy country stayed in the
+# digest under a comment promising it had been removed. A control that does not fire is
+# worse than no control, because the comment stops anyone looking.
+PROXY_COUNTRY_SUBDOMAIN = re.compile(r"https://[a-z]{2}\.linkedin\.com")
+
+
+def canonical_url(rec):
+    return PROXY_COUNTRY_SUBDOMAIN.sub(
+        "https://www.linkedin.com", rec.get("url") or rec.get("input_url") or "-")
+
+
+def digest(rec):
+    position = rec.get("position") or rec.get("headline")
+    lines = [
+        f"{rec.get('name', '?')}  |  {position or '(no headline returned)'}",
+        f"{rec.get('city') or rec.get('location') or '-'}"
+        + (f" | {rec.get('country_code')}" if rec.get("country_code") else ""),
+        f"followers {rec.get('followers', '?')} | connections {rec.get('connections', '?')}",
+        f"current: {company_of(rec)}",
+        f"url: {canonical_url(rec)}",
+    ]
+    acts = recent_activity(rec)
+    if acts:
+        lines += ["", "recent activity (the dormancy read, NOT the posts list):"]
+        lines += [f"  - {a}" for a in acts]
+    about = re.sub(r"\s+", " ", rec.get("about") or "").strip()
+    if about:
+        lines += ["", "about: " + (about[:600] + " ..." if len(about) > 600 else about)]
+    if isinstance(rec.get("experience"), list) and rec["experience"]:
+        lines += ["", "experience:"] + [fmt_span(e) for e in rec["experience"][:8] if isinstance(e, dict)]
+    if isinstance(rec.get("education"), list) and rec["education"]:
+        lines += ["", "education:"] + [fmt_span(e) for e in rec["education"][:4] if isinstance(e, dict)]
+    if isinstance(rec.get("posts"), list) and rec["posts"]:
+        lines += ["", f"authored articles ({len(rec['posts'])}) - NOT an activity signal, these can "
+                      "be years old on a daily-active account:"]
+        for p in rec["posts"][:5]:
+            if isinstance(p, dict):
+                t = re.sub(r"\s+", " ", p.get("title") or p.get("text") or "").strip()
+                lines.append(f"  - {t[:200]}")
+
+    missing = [f for f in ("position", "experience") if not rec.get(f)]
+    if missing:
+        lines += ["", "PROVIDER GAP: Bright Data returned no " + " and no ".join(missing) + " for this",
+                  "profile. That is a gap in the record, NOT evidence of a thin profile. Any gate rule",
+                  "that reads the current title or the role history is reading this same panel, so",
+                  "resolve the title another way before ruling on it."]
+    if not isinstance(rec.get("activity"), list) or not rec.get("activity"):
+        lines += ["", "PROVIDER GAP: no activity array returned, so the dormancy read is unavailable."]
+    return "\n".join(lines)
+
+
+def main(argv):
+    argv = list(argv)
+    if "--help" in argv or "-h" in argv:
+        # Asked-for help exits 0; the wrong-arg-count path below keeps exit 1.
+        print(__doc__.strip())
+        return 0
+    want_json = "--json" in argv
+    timeout = 300
+    if "--timeout" in argv:
+        i = argv.index("--timeout")
+        try:
+            timeout = int(argv[i + 1])
+        except (IndexError, ValueError):
+            sys.exit("li-fetch: --timeout needs a number of seconds")
+        del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith("--")]
+    if len(args) != 1:
+        sys.exit(__doc__.strip())
+
+    key = load_key("BRIGHTDATA_API_KEY")
+    if not key:
+        sys.exit("li-fetch: BRIGHTDATA_API_KEY is not set. Export it, or put it in the "
+                 "gitignored env file at the repo root (copy .env.example to start). "
+                 "Refusing to run: an empty digest would read as a thin profile.")
+
+    url = normalize_url(args[0])
+    q = urllib.parse.urlencode({"dataset_id": DATASET_ID, "include_errors": "true"})
+    status, text = request("POST", f"{BASE}/scrape?{q}", key,
+                           body={"input": [{"url": url}]}, op="POST /scrape")
+
+    if status == 202:
+        snapshot_id = decode_json(text, "POST /scrape", expect=(dict,)).get("snapshot_id")
+        if not snapshot_id:
+            fail(f"got 202 without a snapshot_id, so there is nothing to poll: {text[:200]}")
+        print(f"li-fetch: async, polling snapshot {snapshot_id} ...", file=sys.stderr)
+        payload = poll_snapshot(snapshot_id, key, time.time() + timeout)
+    else:
+        payload = decode_json(text, "POST /scrape")
+
+    recs = records_from(payload)
+    if want_json:
+        print(json.dumps(recs if len(recs) > 1 else recs[0], ensure_ascii=False, indent=2))
+    else:
+        print("\n\n".join(digest(r) for r in recs))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

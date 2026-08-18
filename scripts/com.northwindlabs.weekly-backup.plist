@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.northwindlabs.weekly-backup: the only thing in this repo that runs the off-site
+  backup without the operator present. launchd fires scripts/weekly-backup weekly; that
+  script gates the real run on the .backup-marker date token, so firing late is harmless.
+
+  This file is the SOURCE OF TRUTH and is versioned. launchd loads only from
+  ~/Library/LaunchAgents, so an installed copy lives there too; __REPO__ is the
+  placeholder the install step substitutes, keeping the committed file machine
+  independent.
+
+  INSTALL, UNINSTALL, the mandatory Full Disk Access grant, and the keychain note all
+  live in the header of scripts/weekly-backup. Read that before installing.
+  (XML comments cannot contain a double hyphen, which every one of those shell commands
+  needs, so the procedure lives with the script rather than being mangled here.)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.northwindlabs.weekly-backup</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Developer/CommandLineTools/usr/bin/python3</string>
+    <string>-I</string>
+    <string>-c</string>
+    <string>
+import subprocess, sys
+JOB = "__REPO__/scripts/weekly-backup"
+rc = subprocess.run([sys.executable, JOB]).returncode
+if rc not in (0, 1):
+    subprocess.run(["osascript", "-e", 'display notification "weekly-backup could not even start (exit %d). Usual cause: the Command Line Tools python3 lost Full Disk Access. See outputs/ops/backup-runs/launchd.log" with title "Operator OS backup" sound name "Basso"' % rc])
+sys.exit(rc)
+</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>0</integer>
+    <key>Hour</key><integer>6</integer>
+    <key>Minute</key><integer>20</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>LowPriorityBackgroundIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/outputs/ops/backup-runs/launchd.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__REPO__/outputs/ops/backup-runs/launchd.log</string>
+</dict>
+</plist>

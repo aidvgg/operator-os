@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.northwindlabs.morning-brief: assembles the workday brief before Sam sits down.
+  launchd fires scripts/morning-brief on weekdays; that script is read-only by
+  construction (it holds none of daily-log's five sanctioned write paths) and writes
+  only its own gitignored output under outputs/ops/briefs/, so firing on a day they
+  do not work costs nothing but a file.
+
+  SOURCE OF TRUTH, versioned. launchd loads only from ~/Library/LaunchAgents, so an
+  installed copy lives there too; __REPO__ is the placeholder the install step
+  substitutes, keeping this file machine independent. Baking one home directory into a
+  committed file is what the machine-path doctor check exists to catch: it makes the
+  repo unusable on any other machine and reveals the operator's local paths to anyone
+  who reads it.
+
+  INSTALL, UNINSTALL and the Full Disk Access note live in the header of
+  scripts/morning-brief. Read that before installing. Same TCC trap as weekly-backup:
+  macOS protects ~/Desktop, ~/Documents, ~/Downloads and iCloud Drive, launchd agents
+  inherit none of the terminal's grants, so if this repo sits in one of those the
+  INTERPRETER NAMED BELOW needs Full Disk Access or the job dies before a line of
+  python runs.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.northwindlabs.morning-brief</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-c</string>
+    <string>
+import subprocess, sys
+JOB = "__REPO__/scripts/morning-brief"
+rc = subprocess.run([sys.executable, JOB, "--quiet"]).returncode
+if rc != 0:
+    subprocess.run(["osascript", "-e", 'display notification "morning-brief failed (exit %d). Usual cause: this python lost Full Disk Access. See outputs/ops/briefs/launchd.log" with title "Operator OS brief" sound name "Basso"' % rc])
+sys.exit(rc)
+</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>7</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>7</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>7</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>7</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>7</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/outputs/ops/briefs/launchd.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__REPO__/outputs/ops/briefs/launchd.log</string>
+</dict>
+</plist>

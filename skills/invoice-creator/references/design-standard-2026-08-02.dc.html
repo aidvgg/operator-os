@@ -1,0 +1,297 @@
+<!--
+  NORTHWIND LABS INVOICE DESIGN STANDARD, adopted 2026-08-02.
+  This is the design file the standard was cut in, kept here as the source of
+  record so the look has one owner. It is a design-tool document, not a
+  runnable page: the <x-dc>, <sc-if> and {{ }} markup below only resolve inside
+  that tool. The runnable implementation is scripts/generate-invoice-html.js.
+
+  REDACTED: an invoice design is drawn against a real wire block, and a real
+  wire block never enters git. Bank name and address, account number, routing
+  numbers, SWIFT/BIC codes and the registered business address are replaced
+  here with [REDACTED-SEE-PAYMENT-DETAILS] tokens. Those values live ONLY in
+  the gitignored knowledge/business/invoices/PAYMENT-DETAILS.md, which the
+  skill READS at generation time and never writes. Never restore them to this
+  file. A client contact address is likewise a placeholder.
+
+  WHAT IS NORMATIVE HERE: the design only. Typography (Space Grotesk display
+  and wordmark, Inter Tight body, JetBrains Mono labels), colors (ink #16130f,
+  muted #6b6358, faint #8a8177, lines #e5e0d8, fill #f7f5f1, accent #d97757),
+  the doc-page flowing shell (0.6in margin, running footer), the status chip
+  (Draft/Sent/Paid/Overdue), the amount-due callout, the line-item table
+  anatomy, the optional instalment schedule, the wire table with screen-only
+  copy buttons, and the sign-off.
+
+  WHAT IS NOT: the CONTENT below is a rendering specimen, not a record. Its
+  client, Kestrel Wholesale, is an illustration. It has no folder under
+  knowledge/clients/, no roadmap and no row in any register, and it never gets
+  one. That absence is the control. A specimen that borrows a live client and
+  a live invoice number is a second version of a real invoice sitting in the
+  repo, disagreeing with the register about the amount, and a reader in a
+  hurry cannot tell which of the two is the document that was actually sent.
+  An illustration that owns nothing cannot contradict anything.
+
+  Its number, NL-2026-000, cannot ever be issued: the ledger sequence starts
+  at 001 and only counts up, so 000 belongs to no invoice and never will. Do
+  not "fix" it to a plausible-looking number. Its amounts and dates are
+  specimen values and are kept in step with nothing outside this file. Never
+  quote a number from this file. The live authorities are
+  knowledge/business/invoices/INVOICE-LEDGER.md for numbers,
+  knowledge/business/invoices/SUMMARY.md for status and cash, and the client's
+  own roadmap file for what an engagement costs.
+
+  The build billed here is the same illustrative engagement the proposal
+  design standard quotes, at the same total and the same two-part split, so
+  the two specimens agree with each other instead of putting two prices on one
+  fictional client. If you touch either, keep both in step.
+
+  One deviation the implementation makes deliberately: the design tool put a
+  two-line tagline block under the sign-off. Slogan copy does not belong on a
+  document whose job is to state a number, so it is gone here and the
+  generator renders a tagline only when data explicitly provides one. The
+  no-em-dash rule (knowledge/voice/copy-rules.md) holds in this file too, and
+  the generator hard-refuses any data JSON containing an em or en dash.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="crossorigin" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Inter+Tight:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet" />
+<style>
+doc-page:not(:defined) { visibility: hidden; }
+body { margin: 0; }
+a { color: #b8623c; text-decoration: none; }
+a:hover { color: #d97757; text-decoration: underline; }
+@media print { .no-print { display: none !important; } }
+</style>
+<script src="./doc-page.js"></script>
+</helmet>
+<doc-page margin="0.6in">
+
+<div slot="footer" style="display:flex; justify-content:space-between; align-items:baseline; gap:16px; border-top:1px solid #e5e0d8; padding-top:8px; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.06em; text-transform:uppercase; color:#8a8177">
+  <span>Rivera Holdings LLC &nbsp;·&nbsp; dba Northwind Labs</span>
+  <span>Invoice NL-2026-000</span>
+  <span>sam@northwindlabs.example</span>
+</div>
+
+<header style="display:flex; align-items:flex-start; justify-content:space-between; gap:40px; padding-bottom:22px; border-bottom:2px solid #16130f">
+  <div>
+    <div style="display:flex; align-items:center; gap:10px">
+      <img src="assets/logo.png" alt="" style="width:24px; height:24px; display:block; filter:brightness(0)" />
+      <span style="font-family:'Space Grotesk',sans-serif; font-size:18px; letter-spacing:0.01em; color:#16130f; line-height:1">Northwind Labs</span>
+    </div>
+    <div style="margin-top:14px; font-family:'Inter Tight',sans-serif; font-size:13px; line-height:1.6; color:#6b6358">
+      Rivera Holdings LLC (dba Northwind Labs)<br />[REDACTED-SEE-PAYMENT-DETAILS]<br /><a href="mailto:sam@northwindlabs.example">sam@northwindlabs.example</a>
+    </div>
+  </div>
+  <div style="text-align:right; flex-shrink:0">
+    <div style="font-family:'Space Grotesk',sans-serif; font-size:34px; font-weight:500; letter-spacing:-0.03em; line-height:1; color:#16130f">Invoice</div>
+    <div style="margin-top:8px; font-family:'JetBrains Mono',monospace; font-size:14px; letter-spacing:0.04em; color:#16130f">NL-2026-000</div>
+    <div style="margin-top:12px; display:inline-flex; align-items:center; gap:7px; padding:4px 11px; border:1px solid #d5cec3; border-radius:3px">
+      <span style="width:6px; height:6px; border-radius:50%; display:block; background:{{ statusColor }}"></span>
+      <span style="font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#4a443c">{{ statusLabel }}</span>
+    </div>
+  </div>
+</header>
+
+<section style="display:grid; grid-template-columns:1.15fr 1fr; gap:36px; padding:24px 0 26px; border-bottom:1px solid #e5e0d8; break-inside:avoid">
+  <div>
+    <div style="font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#8a8177; padding-bottom:9px">Bill to</div>
+    <div style="font-family:'Inter Tight',sans-serif; font-size:15px; font-weight:600; color:#16130f; line-height:1.4">Kestrel Wholesale Co.</div>
+    <div style="font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.6; color:#6b6358; margin-top:3px">
+      <a href="mailto:ap@kestrelwholesale.example">ap@kestrelwholesale.example</a><br />Accounts payable
+    </div>
+  </div>
+  <div style="display:grid; grid-template-columns:auto 1fr; gap:7px 18px; align-content:start; font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.5">
+    <span style="color:#8a8177">Invoice number</span><span style="font-family:'JetBrains Mono',monospace; font-size:13px; color:#16130f; text-align:right">NL-2026-000</span>
+    <span style="color:#8a8177">Date issued</span><span style="color:#16130f; text-align:right">25 July 2026</span>
+    <span style="color:#8a8177">Due date</span><span style="color:#16130f; font-weight:600; text-align:right">1 August 2026</span>
+    <span style="color:#8a8177">Terms</span><span style="color:#16130f; text-align:right">7 days from issue</span>
+    <span style="color:#8a8177">Currency</span><span style="color:#16130f; text-align:right">USD</span>
+  </div>
+</section>
+
+<section style="display:flex; align-items:center; justify-content:space-between; gap:24px; margin:22px 0 28px; padding:18px 22px; background:#f7f5f1; border:1px solid #e5e0d8; border-left:3px solid #d97757; break-inside:avoid">
+  <div>
+    <div style="font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#8a8177">Amount due</div>
+    <div style="font-family:'Inter Tight',sans-serif; font-size:13px; color:#6b6358; margin-top:4px">Payable by 1 August 2026</div>
+  </div>
+  <div style="font-family:'Space Grotesk',sans-serif; font-size:32px; font-weight:600; letter-spacing:-0.03em; color:#16130f; line-height:1; white-space:nowrap">$13,000.00</div>
+</section>
+
+<table style="width:100%; border-collapse:collapse; margin-bottom:26px">
+  <thead>
+    <tr>
+      <th style="text-align:left; padding:0 0 8px; border-bottom:1px solid #16130f; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#4a443c">Description</th>
+      <th style="text-align:right; padding:0 0 8px; border-bottom:1px solid #16130f; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#4a443c; white-space:nowrap">Amount (USD)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr style="break-inside:avoid">
+      <td style="padding:16px 24px 16px 0; border-bottom:1px solid #e5e0d8; vertical-align:top">
+        <div style="font-family:'Inter Tight',sans-serif; font-size:15px; font-weight:600; color:#16130f; line-height:1.4">Inventory sync and ops dashboard build, instalment 1 of 2</div>
+        <div style="font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.6; color:#6b6358; margin-top:5px; max-width:62ch">Two-way inventory sync between the point-of-sale system and the warehouse system, plus the operations dashboard built on top of it. Per the proposal dated 24 July 2026.</div>
+      </td>
+      <td style="padding:16px 0; border-bottom:1px solid #e5e0d8; vertical-align:top; text-align:right; font-family:'JetBrains Mono',monospace; font-size:15px; color:#16130f; white-space:nowrap">13,000.00</td>
+    </tr>
+    <tr>
+      <td style="padding:12px 24px 0 0; text-align:right; font-family:'Inter Tight',sans-serif; font-size:14px; color:#6b6358">Subtotal</td>
+      <td style="padding:12px 0 0; text-align:right; font-family:'JetBrains Mono',monospace; font-size:14px; color:#6b6358; white-space:nowrap">13,000.00</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 24px 12px 0; text-align:right; font-family:'Inter Tight',sans-serif; font-size:14px; color:#6b6358">Tax</td>
+      <td style="padding:6px 0 12px; text-align:right; font-family:'JetBrains Mono',monospace; font-size:14px; color:#6b6358; white-space:nowrap">0.00</td>
+    </tr>
+    <tr>
+      <td style="padding:12px 24px 0 0; border-top:2px solid #16130f; text-align:right; font-family:'Inter Tight',sans-serif; font-size:15px; font-weight:600; color:#16130f">Total due (USD)</td>
+      <td style="padding:12px 0 0; border-top:2px solid #16130f; text-align:right; font-family:'JetBrains Mono',monospace; font-size:17px; font-weight:500; color:#16130f; white-space:nowrap">$13,000.00</td>
+    </tr>
+  </tbody>
+</table>
+
+<sc-if value="{{ showSchedule }}" hint-placeholder-val="{{ true }}">
+<section style="margin-bottom:26px; break-inside:avoid">
+  <div style="font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#8a8177; padding-bottom:10px">Instalment schedule</div>
+  <table style="width:100%; border-collapse:collapse; border:1px solid #e5e0d8">
+    <thead>
+      <tr style="background:#f7f5f1">
+        <th style="text-align:left; padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; color:#4a443c">Instalment</th>
+        <th style="text-align:left; padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; color:#4a443c">Milestone</th>
+        <th style="text-align:left; padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; color:#4a443c">Status</th>
+        <th style="text-align:right; padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; color:#4a443c">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; font-weight:600; color:#16130f">1 of 2</td>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; color:#16130f">Kick-off</td>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; font-weight:600; color:#16130f">This invoice</td>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; text-align:right; font-family:'JetBrains Mono',monospace; font-size:14px; font-weight:500; color:#16130f">13,000.00</td>
+      </tr>
+      <tr>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; color:#6b6358">2 of 2</td>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; color:#6b6358">Delivery and sign-off</td>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; color:#6b6358">Scheduled</td>
+        <td style="padding:10px 14px; border-bottom:1px solid #e5e0d8; text-align:right; font-family:'JetBrains Mono',monospace; font-size:14px; color:#6b6358">13,000.00</td>
+      </tr>
+      <tr style="background:#f7f5f1">
+        <td colspan="3" style="padding:10px 14px; font-family:'Inter Tight',sans-serif; font-size:14px; font-weight:600; color:#16130f">Contract total</td>
+        <td style="padding:10px 14px; text-align:right; font-family:'JetBrains Mono',monospace; font-size:14px; font-weight:500; color:#16130f">26,000.00</td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="margin:10px 0 0; font-family:'Inter Tight',sans-serif; font-size:13.5px; line-height:1.6; color:#6b6358; orphans:3; widows:3">Instalments follow delivery milestones, not the calendar. The second falls due on sign-off, so a build that slips does not bill on a date it has not earned. This is a one-time build fee, not a recurring charge.</p>
+</section>
+</sc-if>
+
+<section style="margin-bottom:24px; break-inside:avoid">
+  <div style="font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#8a8177; padding-bottom:10px">Payment details</div>
+  <p style="margin:0 0 12px; font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.6; color:#6b6358">Payable by international wire transfer in USD. Quote reference <strong style="color:#16130f; font-weight:600">NL-2026-000</strong> on the payment.</p>
+  <table style="width:100%; border-collapse:collapse; border:1px solid #e5e0d8">
+    <tbody onClick="{{ onCopy }}">
+      <tr>
+        <td style="width:38%; padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Bank name</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Bank address</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.5; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Beneficiary name</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; color:#16130f"><span data-copy="1">Rivera Holdings, LLC</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Beneficiary address</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.5; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Account number</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:14px; letter-spacing:0.02em; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">ABA routing number</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:14px; letter-spacing:0.02em; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">SWIFT / BIC code</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:14px; letter-spacing:0.02em; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Intermediary bank SWIFT / BIC</td>
+        <td style="padding:9px 14px; border-bottom:1px solid #e5e0d8; font-family:'JetBrains Mono',monospace; font-size:14px; letter-spacing:0.02em; color:#16130f"><span data-copy="1">[REDACTED-SEE-PAYMENT-DETAILS]</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+      <tr>
+        <td style="padding:9px 14px; background:#faf8f5; font-family:'Inter Tight',sans-serif; font-size:13.5px; color:#6b6358">Payment reference</td>
+        <td style="padding:9px 14px; font-family:'JetBrains Mono',monospace; font-size:14px; font-weight:500; letter-spacing:0.02em; color:#16130f"><span data-copy="1">NL-2026-000</span><button type="button" data-copybtn="1" class="no-print" style="margin-left:10px; padding:1px 7px; border:1px solid #e5e0d8; border-radius:3px; background:#fff; font-family:'JetBrains Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8a8177; cursor:pointer" style-hover="border-color:#d97757; color:#d97757">Copy</button></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin-bottom:26px; break-inside:avoid">
+  <div style="font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; letter-spacing:0.13em; text-transform:uppercase; color:#8a8177; padding-bottom:8px">Notes</div>
+  <ul style="margin:0; padding-left:18px; font-family:'Inter Tight',sans-serif; font-size:13.5px; line-height:1.65; color:#6b6358">
+    <li style="margin-bottom:5px">If your bank's wire form has an intermediary / correspondent bank field, use SWIFT <strong style="color:#16130f; font-weight:500">[REDACTED-SEE-PAYMENT-DETAILS]</strong>. If it has no such field, leave it blank.</li>
+    <li style="margin-bottom:5px">If ABA routing number <strong style="color:#16130f; font-weight:500">[REDACTED-SEE-PAYMENT-DETAILS]</strong> is not recognised, the alternate is <strong style="color:#16130f; font-weight:500">[REDACTED-SEE-PAYMENT-DETAILS]</strong>.</li>
+    <li>All amounts are in US Dollars (USD). No tax is applicable.</li>
+  </ul>
+</section>
+
+<section style="display:flex; align-items:flex-end; justify-content:space-between; gap:32px; padding-top:20px; border-top:1px solid #e5e0d8; break-inside:avoid">
+  <div>
+    <p style="margin:0; font-family:'Inter Tight',sans-serif; font-size:14px; line-height:1.6; color:#6b6358; max-width:52ch">Thank you for the work. Questions about this invoice, reply to <a href="mailto:sam@northwindlabs.example">sam@northwindlabs.example</a>.</p>
+    <div style="margin-top:14px; font-family:'Inter Tight',sans-serif; font-size:14px; font-weight:600; color:#16130f">Sam Rivera</div>
+    <div style="font-family:'Inter Tight',sans-serif; font-size:13px; color:#8a8177">Founder, Northwind Labs</div>
+  </div>
+</section>
+
+</doc-page>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;status&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;Draft&quot;,&quot;Sent&quot;,&quot;Paid&quot;,&quot;Overdue&quot;],&quot;default&quot;:&quot;Sent&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Invoice state&quot;},&quot;showSchedule&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Invoice state&quot;}}">
+class Component extends DCLogic {
+  renderVals() {
+    const status = (this.props.status ?? 'Sent').toLowerCase();
+    const colors = { draft: '#a8a095', sent: '#d97757', paid: '#4f8a5b', overdue: '#b03d2e' };
+    return {
+      statusLabel: this.props.status ?? 'Sent',
+      statusColor: colors[status] ?? '#6b6358',
+      showSchedule: this.props.showSchedule ?? true,
+      onCopy: (e) => {
+        const btn = e.target.closest('[data-copybtn]');
+        if (!btn) return;
+        const cell = btn.closest('td');
+        const val = cell && cell.querySelector('[data-copy]');
+        if (!val) return;
+        const text = val.textContent.trim();
+        const done = () => {
+          const prev = btn.textContent;
+          btn.textContent = 'Copied';
+          btn.style.color = '#4f8a5b';
+          btn.style.borderColor = '#4f8a5b';
+          setTimeout(() => { btn.textContent = prev; btn.style.color = '#8a8177'; btn.style.borderColor = '#e5e0d8'; }, 1400);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(() => {});
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); done(); } catch (err) {}
+          document.body.removeChild(ta);
+        }
+      }
+    };
+  }
+}
+</script>
+</body>
+</html>

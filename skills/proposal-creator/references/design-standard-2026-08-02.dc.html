@@ -1,0 +1,488 @@
+<!--
+  NORTHWIND LABS PROPOSAL DESIGN STANDARD, adopted 2026-08-02.
+  Source of record for the look of every proposal, quote and SOW.
+
+  WHAT IS NORMATIVE HERE: the design only. Typography (Space Grotesk display
+  and wordmark, Inter Tight body, JetBrains Mono labels), colors (ink #0b0a09,
+  body #2a241d, muted #6b6358, accent #e89b5c), the doc-page flowing shell
+  (0.68in margin), section anatomy, tables, and the signature block.
+  The runnable implementation is scripts/generate-proposal-html.js.
+
+  WHAT IS NOT: the CONTENT below is a rendering specimen, and every number in
+  it is DEAD. Its client, Kestrel Wholesale, is an illustration. It has no
+  folder under knowledge/clients/, no roadmap, no invoice row, and it never
+  gets one. That absence is the whole control. A design reference that borrows
+  a live client's name ends up stating a second price for an engagement that
+  already has an owner file, and then the repo holds two numbers for one deal
+  with nothing to say which is real. An illustration that owns nothing cannot
+  contradict anything. Its $26,000 total, its 50/50 payment split, its
+  sequencing and its dates are specimen values, stale the moment they were
+  typed. Never quote a number, a date or a commitment from this file. Live
+  numbers sit in their owner files: a client engagement in the roadmap under
+  knowledge/clients/, the productized offer in
+  knowledge/business/outbound-offer.md.
+
+  Why a specimen carrying real-looking numbers is kept as the design reference
+  at all: the design is only legible on something shaped like a real document,
+  and a real-shaped document carries numbers. Numbers go stale faster than
+  layout does, and a reader who trusts the wrong half of this file quotes a
+  price nobody agreed to. That failure has happened. The banner used to be the
+  only control, and a banner is a warning that a reader in a hurry skips, so
+  the control is now structural: the name below belongs to nobody, so there is
+  no live price anywhere for it to disagree with. Keep this banner accurate
+  whenever the content below is touched, and if you ever re-root the specimen
+  on a real client you have removed the control, not edited the file.
+
+  This is a .dc.html design-tool file: {{ props }}, sc-if and the data-dc-script
+  block are design-runtime constructs (support.js), compiled out by the
+  generator. doc-page.js is vendored at ../assets/doc-page.js.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta charset="utf-8">
+<title>Kestrel Wholesale - Inventory Sync &amp; Ops Dashboard Proposal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root { --acc: #e89b5c; --bs: 1; }
+html, body { margin: 0; padding: 0; }
+* { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+doc-page:not(:defined) { visibility: hidden; }
+a { color: #2a241d; text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: var(--acc, #e89b5c); }
+</style>
+<script src="./doc-page.js"></script>
+</helmet>
+
+<doc-page size="{{ paper }}" margin="0.68in" style="font-family:'Inter Tight',system-ui,sans-serif;">
+
+<div slot="header" style="display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:8px;border-bottom:1px solid #2a241d;font-family:'Inter Tight',system-ui,sans-serif;">
+  <div style="display:flex;align-items:center;gap:7px;">
+    <svg viewBox="0 0 100 180" width="10" height="18" style="display:block;color:#0b0a09;"><path fill="currentColor" d="M0 180V0H20L80 120V0H100V180H80L20 60V180Z"></path></svg>
+    <span style="font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:12.5px;letter-spacing:0.01em;color:#0b0a09;white-space:nowrap;">Northwind Labs</span>
+  </div>
+  <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;white-space:nowrap;">Kestrel Wholesale - Inventory sync and ops dashboard</span>
+</div>
+
+<div slot="footer" style="display:flex;align-items:center;justify-content:space-between;gap:20px;padding-top:8px;border-top:1px solid rgba(42,36,29,0.2);font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.11em;text-transform:uppercase;color:#6b6358;">
+  <sc-if value="{{ confidential }}" hint-placeholder-val="{{ true }}"><span>Kestrel Wholesale Co. · Commercial in confidence</span></sc-if>
+  <span>Northwind Labs · operating under Rivera Holdings LLC</span>
+</div>
+
+<header style="margin:0 0 30px;">
+  <div style="display:flex;align-items:center;gap:10px;margin:0 0 18px;">
+    <span style="width:5px;height:5px;background:var(--acc,#e89b5c);display:block;"></span>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:500;letter-spacing:0.16em;text-transform:uppercase;color:#6b6358;">Project proposal · 24 July 2026</span>
+  </div>
+  <h1 style="margin:0 0 14px;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:36px;line-height:1.06;letter-spacing:-0.035em;color:#0b0a09;max-width:20ch;">Inventory sync and ops dashboard for Kestrel Wholesale.</h1>
+  <p style="margin:0;font-size:calc(15.5px * var(--bs,1));line-height:1.6;letter-spacing:-0.005em;color:#2a241d;max-width:62ch;text-wrap:pretty;">Replacing the morning spreadsheet reconciliation with a scheduled sync between the store platform and the warehouse system, and one dashboard the ops team runs the day from.</p>
+</header>
+
+<table style="width:100%;border-collapse:collapse;margin:0 0 34px;border-top:1px solid #2a241d;border-bottom:1px solid #2a241d;">
+  <tbody>
+    <tr>
+      <td style="width:25%;padding:13px 16px 13px 0;vertical-align:top;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6b6358;margin:0 0 5px;">Prepared for</div>
+        <div style="font-size:13px;line-height:1.4;color:#0b0a09;font-weight:500;">Kestrel Wholesale Co.</div>
+      </td>
+      <td style="width:25%;padding:13px 16px;vertical-align:top;border-left:1px solid rgba(42,36,29,0.15);">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6b6358;margin:0 0 5px;">Prepared by</div>
+        <div style="font-size:13px;line-height:1.4;color:#0b0a09;font-weight:500;">Sam Rivera</div>
+        <div style="font-size:12px;line-height:1.4;color:#6b6358;">Northwind Labs</div>
+      </td>
+      <td style="width:25%;padding:13px 16px;vertical-align:top;border-left:1px solid rgba(42,36,29,0.15);">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6b6358;margin:0 0 5px;">Engagement</div>
+        <div style="font-size:13px;line-height:1.4;color:#0b0a09;font-weight:500;">Fixed scope, fixed price</div>
+      </td>
+      <td style="width:25%;padding:13px 0 13px 16px;vertical-align:top;border-left:1px solid rgba(42,36,29,0.15);">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6b6358;margin:0 0 5px;">Total investment</div>
+        <div style="font-size:13px;line-height:1.4;color:#0b0a09;font-weight:500;">$26,000 USD</div>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<section style="margin:0 0 26px;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">01</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Overview</h2>
+  </div>
+  <p style="margin:0 0 12px;font-size:calc(14px * var(--bs,1));line-height:1.62;color:#2a241d;text-wrap:pretty;">Kestrel Wholesale runs stock in two systems that do not talk to each other: the store platform that sells it and the warehouse system that holds it. Every morning someone exports a CSV from each, lines them up in a spreadsheet, and corrects the differences by hand. The reconciliation takes about ninety minutes, and the two systems have already drifted again by the time it is finished.</p>
+  <p style="margin:0 0 12px;font-size:calc(14px * var(--bs,1));line-height:1.62;color:#2a241d;text-wrap:pretty;">This build replaces that with a scheduled sync between the two systems, a conflict log for the cases a machine should not decide alone, and an ops dashboard that shows current stock, open exceptions and the health of the sync itself.</p>
+  <p style="margin:0;font-size:calc(14px * var(--bs,1));line-height:1.62;color:#2a241d;text-wrap:pretty;">All work is delivered by Northwind Labs, operating under Rivera Holdings LLC. The sync ships first and on its own, so the manual reconciliation stops before any dashboard work starts.</p>
+</section>
+
+<section style="break-before:page;margin:0 0 26px;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 6px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">02</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Scope of work</h2>
+  </div>
+
+  <h3 style="margin:20px 0 0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:14.5px;letter-spacing:-0.01em;color:#0b0a09;">2.1 Inventory sync</h3>
+  <table style="width:100%;border-collapse:collapse;margin:12px 0 26px;">
+    <thead>
+      <tr>
+        <th style="width:29%;padding:0 18px 8px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Deliverable</th>
+        <th style="padding:0 0 8px;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Store platform connector</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Read and write against the store platform's inventory API, with rate limiting, retries and a resume point, so a slow or throttled hour delays the sync instead of losing writes.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Warehouse system connector</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">The same on the warehouse side, working from its export feed and its adjustment endpoint. SKU mapping between the two systems is built from your current mapping sheet and then owned by the sync.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Scheduled sync and backfill</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">A run every fifteen minutes, plus a one-off backfill that brings the two systems into agreement on day one. Runs are idempotent, so a re-run after a failure cannot double-count an adjustment.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Conflict handling</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Rules for the cases that resolve themselves, and a queue for the ones that should not. A disagreement a human has to judge is never silently overwritten; it lands in the exception queue with both values and both timestamps.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Run health and alerting</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Every run records what it read, wrote and skipped. A failed run, or a run that stops happening at all, raises an alert to a channel you choose. A sync that dies quietly is worse than no sync.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin:0 0 0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:14.5px;letter-spacing:-0.01em;color:#0b0a09;">2.2 Ops dashboard</h3>
+  <table style="width:100%;border-collapse:collapse;margin:12px 0 0;">
+    <thead>
+      <tr>
+        <th style="width:29%;padding:0 18px 8px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Deliverable</th>
+        <th style="padding:0 0 8px;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Stock view</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Current quantity per SKU across both systems, with the difference called out where one still exists. Filter by location, category and supplier.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Exception queue</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">The conflicts the sync would not decide, with a one-click resolution that writes back to both systems and records who chose what.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Sync health panel</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Last successful run, current lag, failures in the past day, and the volume moved. This is how the ops lead answers "is it working" without asking anyone.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Access and export</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Two roles, viewer and resolver, on your existing single sign-on. Every view exports to CSV, because the finance team will want the numbers in a spreadsheet anyway.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Handover and runbook</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">A written runbook covering deploy, credential rotation, the three failure modes worth naming, and how to pause the sync safely. Delivered with a walkthrough for whoever will own it.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="break-before:page;margin:0 0 26px;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">03</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Investment</h2>
+  </div>
+  <table style="width:100%;border-collapse:collapse;margin:0 0 16px;">
+    <thead>
+      <tr>
+        <th style="padding:0 18px 8px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Description</th>
+        <th style="width:22%;padding:0 0 8px;border-bottom:1px solid #2a241d;text-align:right;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Amount (USD)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;">Phase 1, inventory sync</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);text-align:right;font-family:'JetBrains Mono',monospace;font-size:calc(13px * var(--bs,1));color:#0b0a09;">$17,000</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;">Phase 2, ops dashboard</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);text-align:right;font-family:'JetBrains Mono',monospace;font-size:calc(13px * var(--bs,1));color:#0b0a09;">$9,000</td>
+      </tr>
+      <tr>
+        <td style="padding:14px 18px 14px 0;border-bottom:1px solid #2a241d;font-size:calc(13.5px * var(--bs,1));font-weight:600;color:#0b0a09;">Total</td>
+        <td style="padding:14px 0;border-bottom:1px solid #2a241d;text-align:right;font-family:'JetBrains Mono',monospace;font-size:calc(15px * var(--bs,1));font-weight:500;color:#0b0a09;">$26,000</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin:22px 0 10px;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:14.5px;letter-spacing:-0.01em;color:#0b0a09;">3.1 Payment terms</h3>
+  <table style="width:100%;border-collapse:collapse;margin:0 0 12px;">
+    <tbody>
+      <tr>
+        <td style="width:34px;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--acc,#e89b5c);">01</td>
+        <td style="padding:11px 18px 11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;">Due at project kick-off</td>
+        <td style="width:22%;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);text-align:right;font-family:'JetBrains Mono',monospace;font-size:calc(13px * var(--bs,1));color:#0b0a09;">$13,000</td>
+      </tr>
+      <tr>
+        <td style="padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--acc,#e89b5c);">02</td>
+        <td style="padding:11px 18px 11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;">Due on delivery and sign-off</td>
+        <td style="padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);text-align:right;font-family:'JetBrains Mono',monospace;font-size:calc(13px * var(--bs,1));color:#0b0a09;">$13,000</td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="margin:0;font-size:calc(13px * var(--bs,1));line-height:1.55;color:#6b6358;">All amounts are in US Dollars. Payment is due within 7 days of invoice date.</p>
+</section>
+
+<section style="margin:0 0 26px;break-inside:avoid;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">04</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">What this covers</h2>
+  </div>
+  <ul style="margin:0;padding:0;list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:10px 28px;">
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>Connectors to both systems, built and running on your infrastructure</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>One-off backfill that brings both systems into agreement on day one</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>Scheduled sync every fifteen minutes, idempotent and resumable</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>Conflict rules plus an exception queue for the judgement calls</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>Alerting on failed runs and on runs that stop happening</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>Ops dashboard with stock, exception and sync-health views</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>Runbook and a live handover walkthrough for the owning team</span></li>
+    <li style="display:flex;gap:9px;align-items:flex-start;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#2a241d;"><svg viewBox="0 0 12 12" width="11" height="11" style="flex:none;margin-top:4px;color:var(--acc,#e89b5c);"><path d="M1.5 6.4 4.4 9.2 10.5 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"></path></svg><span>30 days of post-delivery support for bug fixes and configuration changes</span></li>
+  </ul>
+</section>
+
+<section style="margin:0 0 26px;break-inside:avoid;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">05</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Out of scope</h2>
+  </div>
+  <p style="margin:0 0 14px;font-size:calc(14px * var(--bs,1));line-height:1.62;color:#2a241d;text-wrap:pretty;">Any work beyond the scope above is quoted separately before commencement. Specifically excluded from this engagement:</p>
+  <table style="width:100%;border-collapse:collapse;">
+    <tbody>
+      <tr>
+        <td style="width:31%;padding:11px 18px 11px 0;border-top:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Purchase-order automation</td>
+        <td style="padding:11px 0;border-top:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Reordering off the synced stock levels is a natural next step and a separate engagement. This build gives it clean numbers to work from.</td>
+      </tr>
+      <tr>
+        <td style="padding:11px 18px 11px 0;border-top:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Historical data cleanup</td>
+        <td style="padding:11px 0;border-top:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">The backfill reconciles current quantities. Correcting years of historical movement records is a data project of its own, quoted separately if wanted.</td>
+      </tr>
+      <tr>
+        <td style="padding:11px 18px 11px 0;border-top:1px solid rgba(42,36,29,0.13);border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Third-system integrations</td>
+        <td style="padding:11px 0;border-top:1px solid rgba(42,36,29,0.13);border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">The accounting package and the supplier portals are not in this build. The connector pattern is written so a third system is an addition, not a rewrite.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin:0 0 26px;break-inside:avoid;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">06</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Definition of done</h2>
+  </div>
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr>
+        <th style="width:28%;padding:0 18px 8px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Phase</th>
+        <th style="padding:0 0 8px;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Deliverables and acceptance</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Phase 1 - Inventory sync</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Deliverables: both connectors, the backfill, the fifteen-minute schedule, conflict rules, the exception queue and run alerting. Accepted when your team picks any ten SKUs, changes stock in either system, and sees both systems agree within one sync window without anyone opening a spreadsheet, and when a deliberately failed run raises an alert in your channel.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Phase 2 - Ops dashboard</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;">Deliverables: stock view, exception queue, sync health panel, two roles on your single sign-on, CSV export, runbook and handover. Accepted when an ops lead who was not in the build resolves a real exception end to end from the dashboard alone, using only the runbook, and the resolution shows in both systems.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="break-before:page;margin:0 0 26px;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">07</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Sequencing</h2>
+  </div>
+  <table style="width:100%;border-collapse:collapse;">
+    <tbody>
+      <tr>
+        <td style="width:38px;padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--acc,#e89b5c);">01</td>
+        <td style="width:27%;padding:13px 18px 13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Access and mapping</td>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">API credentials on both systems and a copy of the current SKU mapping sheet. Nothing else starts until both exist.</td>
+      </tr>
+      <tr>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--acc,#e89b5c);">02</td>
+        <td style="padding:13px 18px 13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Sync in dry run</td>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">The sync runs read-only for a week and reports what it would have changed. You approve the diff before it is allowed to write.</td>
+      </tr>
+      <tr>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--acc,#e89b5c);">03</td>
+        <td style="padding:13px 18px 13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Backfill and go live</td>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Backfill runs once, then writes turn on. The manual morning reconciliation stops here, which is the point of doing the sync first.</td>
+      </tr>
+      <tr>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--acc,#e89b5c);">04</td>
+        <td style="padding:13px 18px 13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Dashboard and handover</td>
+        <td style="padding:13px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Built on a sync that is already running in production, so the views show real data from the first day of the phase.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin:0 0 26px;break-inside:avoid;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">08</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Ongoing platform costs</h2>
+  </div>
+  <p style="margin:0 0 14px;font-size:calc(14px * var(--bs,1));line-height:1.62;color:#2a241d;text-wrap:pretty;">Separate from the build fee. These run on your side once live, and scale with volume.</p>
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr>
+        <th style="width:31%;padding:0 18px 8px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Item</th>
+        <th style="padding:0 0 8px;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Hosting</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Roughly $25-60/month for the worker and the dashboard on your existing cloud account.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Managed database</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Roughly $20/month at your current SKU count, holding the mapping, the run log and the exception queue.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.45;font-weight:500;color:#0b0a09;">Store platform API tier</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">No change at the fifteen-minute interval on your current plan. A shorter interval would push you into their next tier; we would raise that before changing it.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin:0 0 26px;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">09</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Decisions required from Kestrel Wholesale</h2>
+  </div>
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr>
+        <th style="padding:0 18px 8px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Decision</th>
+        <th style="width:30%;padding:0 0 8px;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Needed by</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Which system wins on a straight quantity disagreement, and which cases must go to a human instead.</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#0b0a09;">Before the conflict rules are built.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Sign-off on the dry-run diff. Writes stay off until you give it.</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#0b0a09;">End of the dry-run week.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Where sync alerts land, and who is expected to act on them.</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#0b0a09;">Before go live.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Who holds the resolver role on the dashboard, as opposed to view-only access.</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#0b0a09;">Before the dashboard phase starts.</td>
+      </tr>
+      <tr>
+        <td style="padding:12px 18px 12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;">Confirmation of the team that will own the sync after handover, so the runbook is written for them.</td>
+        <td style="padding:12px 0;border-bottom:1px solid rgba(42,36,29,0.13);vertical-align:top;font-size:calc(13.5px * var(--bs,1));line-height:1.5;color:#0b0a09;">Before handover is scheduled.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin:0 0 26px;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">10</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Terms and conditions</h2>
+  </div>
+  <ol style="margin:0;padding:0;list-style:none;">
+    <li style="display:flex;gap:14px;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6b6358;flex:none;width:20px;">10.1</span><span>The client owns all delivered code, configuration and documentation. Everything runs on the client's own cloud and platform accounts.</span></li>
+    <li style="display:flex;gap:14px;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6b6358;flex:none;width:20px;">10.2</span><span>Short bursts of client-side admin time are required: credential issue, single sign-on configuration and dry-run review happen on your accounts, with Northwind Labs driving.</span></li>
+    <li style="display:flex;gap:14px;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6b6358;flex:none;width:20px;">10.3</span><span>The sync does not write to either system until the dry-run diff is approved in writing.</span></li>
+    <li style="display:flex;gap:14px;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6b6358;flex:none;width:20px;">10.4</span><span>Scope changes will be quoted and agreed in writing before work begins.</span></li>
+    <li style="display:flex;gap:14px;padding:11px 0;border-bottom:1px solid rgba(42,36,29,0.13);font-size:calc(13.5px * var(--bs,1));line-height:1.55;color:#2a241d;text-wrap:pretty;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6b6358;flex:none;width:20px;">10.5</span><span>30 days of post-delivery support is included for bug fixes and configuration adjustments.</span></li>
+  </ol>
+</section>
+
+<section style="break-before:page;break-inside:avoid;margin:0;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid #2a241d;">
+    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--acc,#e89b5c);">11</span>
+    <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:19px;letter-spacing:-0.02em;color:#0b0a09;">Acceptance</h2>
+  </div>
+  <p style="margin:0 0 30px;font-size:calc(14px * var(--bs,1));line-height:1.62;color:#2a241d;max-width:66ch;text-wrap:pretty;">By signing below, both parties agree to the scope of work, pricing, and terms outlined in this proposal.</p>
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr>
+        <th style="width:50%;padding:0 26px 10px 0;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Client · Kestrel Wholesale Co.</th>
+        <th style="width:50%;padding:0 0 10px 26px;border-bottom:1px solid #2a241d;text-align:left;font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:500;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Northwind Labs · Rivera Holdings LLC</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding:34px 26px 8px 0;vertical-align:bottom;"><div style="border-bottom:1px solid #2a241d;height:1px;"></div></td>
+        <td style="padding:34px 0 8px 26px;vertical-align:bottom;"><div style="border-bottom:1px solid #2a241d;height:1px;"></div></td>
+      </tr>
+      <tr>
+        <td style="padding:0 26px 0 0;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Signature</td>
+        <td style="padding:0 0 0 26px;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Signature</td>
+      </tr>
+      <tr>
+        <td style="padding:34px 26px 8px 0;vertical-align:bottom;"><div style="border-bottom:1px solid #2a241d;height:1px;"></div></td>
+        <td style="padding:34px 0 8px 26px;vertical-align:bottom;"><div style="border-bottom:1px solid #2a241d;height:1px;"></div></td>
+      </tr>
+      <tr>
+        <td style="padding:0 26px 0 0;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Name and title</td>
+        <td style="padding:0 0 0 26px;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Name and title</td>
+      </tr>
+      <tr>
+        <td style="padding:34px 26px 8px 0;vertical-align:bottom;"><div style="border-bottom:1px solid #2a241d;height:1px;"></div></td>
+        <td style="padding:34px 0 8px 26px;vertical-align:bottom;"><div style="border-bottom:1px solid #2a241d;height:1px;"></div></td>
+      </tr>
+      <tr>
+        <td style="padding:0 26px 0 0;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Date</td>
+        <td style="padding:0 0 0 26px;font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:0.13em;text-transform:uppercase;color:#6b6358;">Date</td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="margin:34px 0 0;padding-top:14px;border-top:1px solid rgba(42,36,29,0.2);font-size:calc(13px * var(--bs,1));line-height:1.55;color:#6b6358;">Questions or clarifications on any part of this proposal: contact Sam Rivera at Northwind Labs.</p>
+</section>
+
+</doc-page>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;accent&quot;: { &quot;editor&quot;: &quot;color&quot;, &quot;default&quot;: &quot;#e89b5c&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;options&quot;: [&quot;#e89b5c&quot;, &quot;#d97757&quot;, &quot;#2a241d&quot;], &quot;section&quot;: &quot;Document&quot; },
+  &quot;paper&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;default&quot;: &quot;letter&quot;, &quot;options&quot;: [&quot;letter&quot;, &quot;a4&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Document&quot; },
+  &quot;density&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;default&quot;: &quot;standard&quot;, &quot;options&quot;: [&quot;compact&quot;, &quot;standard&quot;, &quot;relaxed&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Document&quot; },
+  &quot;confidential&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Document&quot; }
+}">
+class Component extends DCLogic {
+  _apply() {
+    const r = document.documentElement.style;
+    r.setProperty('--acc', this.props.accent ?? '#e89b5c');
+    const d = this.props.density ?? 'standard';
+    r.setProperty('--bs', d === 'compact' ? '0.94' : d === 'relaxed' ? '1.06' : '1');
+  }
+  componentDidMount() { this._apply(); }
+  componentDidUpdate() { this._apply(); }
+  renderVals() {
+    return {
+      paper: this.props.paper ?? 'letter',
+      confidential: this.props.confidential ?? true
+    };
+  }
+}
+</script>
+</body>
+</html>

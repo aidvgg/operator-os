@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""reddit-scan - mine public forum posts for pain-point candidates.
+
+WHAT THIS IS. Acquisition plus a cheap mechanical prefilter, nothing more. It fetches
+posts from a configurable list of subreddits, drops what it has already reported, scores
+each one on signals a regex can honestly see, and writes ranked candidates to
+outputs/research/pain-signals/. The judgment call (how intense the pain really is, what
+you would sell against it, where it sits in the bank's clusters) is a reading task for you
+or for an agent, and this script does not pretend to do it.
+
+THE INTAKE GATE. Quality over quantity, with one caveat: a post carrying a strong signal
+OR a willingness-to-pay tell is worth capturing even when it is not the best post of the
+week. So a candidate is KEPT when it shows high signal OR a WTP tell. Not both, and no
+high threshold at intake. The bank's own quality bar is a separate question, asked at
+curation time, and the rubric for it lives in knowledge/pain-points/README.md. If you
+move this gate, record the ruling in ai/DECISIONS.md so it is not re-argued every run.
+
+WRITE BOUNDARY. Everything this script writes is a CANDIDATE. The default run writes only
+under outputs/. With --append-bank it also appends rows to
+knowledge/pain-points/pain-point-bank.csv: append-only, never editing or deleting an
+existing row, every new row marked "CANDIDATE - not promoted". It cannot mark anything
+promoted. Promotion is a human edit, you read the row and you change its status. A scraper
+allowed to promote its own finds fills the bank with its own regex taste, and the bank
+stops being evidence about the market.
+
+PROVIDERS. Arctic Shift (arctic-shift.photon-reddit.com) is the only wired source: free,
+no key, full text search over full history, fresh to about t-1 day. Its full-text search
+must be scoped to a subreddit or author, which is the normal case here. PullPush is
+deliberately NOT wired: it answers HTTP 200 with valid JSON while its data sits frozen
+more than a year back and its `after=` filter is silently ignored, so a naive poller looks
+healthy forever over dead data. That is the failure mode to fear across this whole
+category of source, confidently wrong rather than plainly down.
+
+Usage:
+  scripts/reddit-scan [--subs a,b,c] [--terms x,y] [--days N] [--limit N]
+                      [--min-score N] [--json] [--reset] [--dry-run] [--append-bank]
+  scripts/reddit-scan --help
+
+  --help         print this usage and exit without touching the network
+  --subs         comma-separated subreddits (default: SEED_SUBS below)
+  --terms        comma-separated search terms (default: SEED_TERMS below)
+  --days         how far back to look (default 14)
+  --limit        max posts per subreddit-term query (default 25)
+  --min-score    keep only candidates at or above this prefilter score (default 2)
+  --reset        forget seen-state so everything reports as new again
+  --dry-run      fetch and score, write nothing
+  --append-bank  also append the kept rows to the pain point bank CSV, marked as
+                 candidates, on top of the normal outputs/ write
+
+FAILURE CONTRACT. Every failure says so on stderr in one line naming the operation and
+the cause. Never a traceback. A timeout, a dropped connection and a provider-side throttle
+or 5xx are retried a bounded number of times with backoff, and each retry says so with its
+count. A 4xx, a non-JSON body and an empty body are never retried.
+
+This scans a grid, so the exit code answers "can I trust this file", not "was everything
+perfect". Exit 0 means the scan ran and the report stands, with any individual query
+failures listed under Query errors. Exit 1 means the report is incomplete, in one of two
+ways it names at the top of the file: PARTIAL SCAN, the run stopped early and holds only
+what it had collected by then, or FAILED SCAN, nothing answered at all and the empty
+result is infrastructure rather than market signal. A partial run is kept rather than
+discarded, because throwing away 40 completed queries because query 41 timed out costs
+more than the failure did.
+
+State: outputs/ops/reddit-seen.json (gitignored). Output:
+outputs/research/pain-signals/<YYYY-MM-DD>.md plus a .json twin.
+"""
+
+import csv
+import json
+import re
+import socket
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+STATE = REPO / "outputs" / "ops" / "reddit-seen.json"
+OUT_DIR = REPO / "outputs" / "research" / "pain-signals"
+BANK_CSV = REPO / "knowledge" / "pain-points" / "pain-point-bank.csv"
+AS_BASE = "https://arctic-shift.photon-reddit.com/api"
+UA = "operator-os-painscan/1.0 (research; low volume)"
+
+# ---- CONFIGURE THESE TWO LISTS FOR YOUR OWN ICP. Everything else is machinery. ----
+
+# A wide net of places where small and mid-size operators complain about their own
+# back office. Wide on purpose: SCORING does the selecting, not the subreddit list.
+# Narrow the net to one niche and the bank only ever confirms what you already believed.
+SEED_SUBS = ["smallbusiness", "Entrepreneur", "SaaS", "ecommerce", "shopify",
+             "msp", "sysadmin", "bookkeeping", "nocode", "automate"]
+
+# Terms are pain-shaped, not product-shaped: they describe what someone is doing
+# wrong-by-hand, which is what the bank's best entries all have in common. "spreadsheet"
+# finds a real problem, "automation platform" finds people already shopping for a vendor.
+SEED_TERMS = ["manual", "spreadsheet", "copy paste", "double entry",
+              "reporting", "reconcile", "hours every week", "chasing"]
+
+# ---------------------------------------------------------------------------------
+
+# WTP tells: budget mentions, current tool spend, hiring intent. This must mean "would
+# spend money to make THIS problem go away", not "a dollar figure appears somewhere". A
+# bare amount is usually the poster's own selling price (for example "how do you handle
+# $5k orders"), which is quantification, not demand. A bare-$ pattern once flagged
+# most of a batch here and the gate stopped selecting anything, which is the same as
+# having no gate. A bare amount now scores under `quantified` instead.
+WTP_PAT = re.compile(
+    r"(\bw(?:ould|ill)ing to pay\b|\bwould pay\b|\bhappy to pay\b|\bi'?d pay\b"
+    r"|\bpay(?:ing)? (?:for|someone|a dev|an agency|a va)\b"
+    r"|\bwe (?:pay|spend)\b|\bcurrently (?:pay|spend)\w*\b|\bpaying \$"
+    r"|\b(?:tool|software|saas|subscription) (?:costs?|spend|budget)\b"
+    r"|\bbudget (?:for|is|of)\b|\blooking to hire\b|\bwant to hire\b|\bhiring (?:a|an|someone)\b"
+    r"|\bworth paying\b|\bhow much (?:do you|would you|should i) (?:pay|charge|spend)\b"
+    r"|\bany (?:tool|software|service) (?:worth|that'?s worth)\b)", re.I)
+
+# Signal tells the bank's rubric asks for: first-person active pain, quantified impact,
+# a named stack, tried-and-failed, and someone openly asking how others solve it.
+SIGNAL_PATS = [
+    ("first_person_pain", re.compile(
+        r"\b(i'?m (?:drowning|stuck|losing|wasting|spending)|we'?re (?:drowning|stuck|losing|wasting)"
+        r"|driving me (?:crazy|nuts)|sick of|fed up|nightmare|painful|struggl\w+|burn(?:ing|t) out)\b", re.I)),
+    ("quantified", re.compile(
+        r"\b(\d+\s?(?:hours?|hrs?|days?|weeks?)\b|\d+\s?%|\d+\s?clients?\b|\d+\s?x\b)", re.I)),
+    ("named_stack", re.compile(
+        r"\b(zapier|make\.com|n8n|airtable|notion|clickup|asana|monday|trello|hubspot|salesforce"
+        r"|slack|google sheets?|sheets|excel|looker|power bi|access|filemaker"
+        r"|quickbooks|freshbooks|sage|stripe|square|shopify|woocommerce|netsuite)\b", re.I)),
+    ("tried_failed", re.compile(
+        r"\b(tried|we built|built (?:my|our) own|doesn'?t work|didn'?t work|gave up|switched (?:from|back)"
+        r"|too expensive|broke|breaks|fell apart)\b", re.I)),
+    ("asking_how", re.compile(
+        r"\b(how do you|how does everyone|what do you use|any(?:one|body) (?:else|using|found)"
+        r"|looking for a (?:tool|way|system)|is there a (?:tool|way))\b", re.I)),
+]
+
+
+def tls_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    for ca in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
+        if Path(ca).exists():
+            return ssl.create_default_context(cafile=ca)
+    return ssl.create_default_context()
+
+
+CTX = tls_context()
+
+
+# ------------------------------------------------------------------- transport
+
+# This block exists because five ordinary failures used to leave this script as a Python
+# traceback: a read timeout, a connection reset, a 200 whose body is not JSON, a 200 with
+# an empty body, and any other socket-level error. Only HTTPError and URLError were
+# caught, and neither of those covers a socket that dies mid-read. On a grid scan the cost
+# is doubled: the traceback also threw away every query that had already succeeded.
+
+# Two budgets, because the two failures behave differently. A throttle is the provider
+# asking to be asked again later, so it is worth five tries. A dead socket either comes
+# back fast or is not coming back, and this runs across a grid of dozens of queries where
+# a long transport retry is paid once per query.
+THROTTLE_RETRIES = 5
+THROTTLE_BACKOFF = 4    # seconds, multiplied by the attempt number
+TRANSPORT_RETRIES = 3
+TRANSPORT_BACKOFF = 3
+ABORT_AFTER = 3         # consecutive query failures that mean the provider itself is down
+
+
+class ScanError(Exception):
+    """A transport failure that survived its retries.
+
+    Raised, not exited on. The caller decides whether one bad query is worth abandoning
+    the scan, because a scan that dies at query 41 still knows the answers to queries 1
+    through 40 and throwing those away helps nobody.
+    """
+
+
+class _Retry(Exception):
+    """Internal: a failure worth one more attempt. Never escapes as_get()."""
+
+    def __init__(self, what, delay, kind):
+        super().__init__(what)
+        self.what, self.delay, self.kind = what, delay, kind
+
+
+def _as_attempt(req, timeout=60):
+    """One round trip -> decoded object. Raises _Retry or ScanError.
+
+    The except order matters and is not alphabetical: HTTPError is a subclass of URLError,
+    which is a subclass of OSError, while a read timeout and a connection reset are OSError
+    subclasses that are NOT URLError. Catching URLError alone is exactly how the timeout
+    and the reset used to escape.
+    """
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:200]
+        except OSError:
+            pass
+        # 422 is Arctic Shift's load-shed response, body "Timeout. Maybe slow down a bit".
+        # It is a throttle, not a bad request, so it must be retried rather than surfaced.
+        if e.code in (422, 429, 500, 502, 503, 504):
+            raise _Retry(f"HTTP {e.code} {body}".strip(), THROTTLE_BACKOFF, "throttle")
+        if e.code == 400:
+            return {"error": body or "bad request"}
+        raise ScanError(f"Arctic Shift HTTP {e.code}: {body}. Not retried, a {e.code} repeats")
+    except (socket.timeout, TimeoutError):
+        raise _Retry(f"read timed out after {timeout}s", TRANSPORT_BACKOFF, "transport")
+    except ConnectionError as e:
+        raise _Retry(f"connection dropped: {e}", TRANSPORT_BACKOFF, "transport")
+    except urllib.error.URLError as e:
+        # URLError wraps connect-time failures, so a timeout or a reset can arrive wrapped.
+        # Classify on the wrapped reason, not on the wrapper.
+        if isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
+            raise _Retry(f"connect failed: {e.reason}", TRANSPORT_BACKOFF, "transport")
+        raise ScanError(f"Arctic Shift network error: {e.reason}. Check connectivity or DNS")
+    except OSError as e:
+        # TLS handshake failures and anything else socket-level. Named rather than dumped.
+        raise ScanError(f"Arctic Shift transport error: {type(e).__name__}: {e}")
+
+    body = raw.decode("utf-8", "replace").strip()
+    if not body:
+        raise ScanError("Arctic Shift answered 200 with an EMPTY body. That is a provider "
+                        "fault, not an empty result set, so do not read it as 'no signal'")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as e:
+        # This whole category of source fails confidently rather than plainly, so a 200
+        # carrying an error page gets named instead of being retried into a hang.
+        raise ScanError(f"Arctic Shift answered 200 with a non-JSON body ({e.msg} at char "
+                        f"{e.pos}): {body[:80]!r}. Not retried, a decode fault repeats")
+    if not isinstance(data, dict):
+        raise ScanError(f"Arctic Shift answered 200 with JSON {type(data).__name__}, "
+                        f"expected an object: {body[:80]!r}")
+    return data
+
+
+def as_get(path, params):
+    """Arctic Shift GET with bounded, announced backoff. Its rate limit is dynamic and
+    load-based, and heavy body queries do return 'Timeout. Maybe slow down a bit', so
+    retrying is mandatory.
+
+    Returns the decoded object, or {"error": ...} for a query the provider itself refused.
+    Raises ScanError when the transport failed and stayed failed.
+    """
+    url = f"{AS_BASE}{path}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    for attempt in range(max(THROTTLE_RETRIES, TRANSPORT_RETRIES) + 1):
+        try:
+            data = _as_attempt(req)
+        except _Retry as r:
+            budget = THROTTLE_RETRIES if r.kind == "throttle" else TRANSPORT_RETRIES
+            if attempt >= budget:
+                if r.kind == "throttle":
+                    # Load shedding is per query. Report it as a query error and let the
+                    # scan carry on: the next subreddit may well answer.
+                    return {"error": f"throttled after {budget} retries: {r.what}"}
+                raise ScanError(f"{r.what}, still failing after {budget} retries. "
+                                "Transient by nature, so retry the scan later")
+            delay = r.delay * (attempt + 1)
+            print(f"reddit-scan: {r.what}, retry {attempt + 1} of {budget} in {delay}s",
+                  file=sys.stderr)
+            time.sleep(delay)
+            continue
+        if attempt:
+            print(f"reddit-scan: query succeeded after {attempt} "
+                  f"retr{'y' if attempt == 1 else 'ies'}", file=sys.stderr)
+        return data
+
+
+def score(text, upvotes, comments):
+    """Mechanical prefilter only. Returns (points, tells, has_wtp)."""
+    tells, pts = [], 0
+    for name, pat in SIGNAL_PATS:
+        if pat.search(text):
+            tells.append(name)
+            pts += 1
+    has_wtp = bool(WTP_PAT.search(text))
+    if has_wtp:
+        tells.append("wtp")
+        pts += 2  # the intake gate treats a WTP tell as independently sufficient
+    if (comments or 0) >= 15:
+        tells.append("thread_validation")
+        pts += 1
+    if (upvotes or 0) >= 25:
+        pts += 1
+    return pts, tells, has_wtp
+
+
+def load_state(reset):
+    if reset or not STATE.exists():
+        return {"seen_ids": [], "last_run": None}
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return {"seen_ids": [], "last_run": None}
+
+
+# ------------------------------------------------------- candidate bank append ----
+
+CANDIDATE_MARK = "CANDIDATE - not promoted"
+
+# The columns this script can fill honestly, every one of them observable in the post.
+# Used verbatim when the bank CSV does not exist yet. When it does exist, ITS header wins
+# and any column a scraper cannot know is left blank for the human pass.
+CANDIDATE_COLUMNS = [
+    "Status", "Date Added", "Source Platform", "Source URL", "Short Pain Summary",
+    "Raw Quote", "Signals", "Prefilter Score", "Willingness to Pay",
+]
+
+# Header names drift. Map the obvious alternatives onto the fields above, so a bank that
+# calls its summary column "Pain Point" gets filled instead of silently appending a row
+# with a blank where the whole point of the row was supposed to be.
+COLUMN_ALIASES = {
+    "pain point": "short pain summary", "pain": "short pain summary",
+    "summary": "short pain summary", "quote": "raw quote",
+    "source": "source platform", "platform": "source platform",
+    "url": "source url", "link": "source url", "permalink": "source url",
+    "date": "date added", "added": "date added",
+    "wtp": "willingness to pay", "tells": "signals", "score": "prefilter score",
+}
+
+
+def bank_row(c):
+    """One candidate as a lowercased column-name -> value map.
+
+    Nothing here is inferred. Intensity, cluster and the angle you would sell against are
+    all deliberately absent: those are the reading task, and a blank cell is an honest
+    prompt to do it while a guessed cell is a lie the bank then carries forever.
+    """
+    quote = re.sub(r"\s+", " ", c["body"] or "")[:500].strip()
+    return {
+        "status": CANDIDATE_MARK,
+        "date added": date.today().isoformat(),
+        "source platform": f"Reddit r/{c['subreddit']}",
+        "source url": c["url"],
+        "short pain summary": c["title"],
+        "raw quote": quote or c["title"],
+        "signals": ", ".join(c["tells"]) or "none",
+        "prefilter score": str(c["points"]),
+        "willingness to pay": "tell present" if c["wtp"] else "not stated",
+    }
+
+
+def append_to_bank(kept):
+    """Append kept candidates to the pain point bank CSV. Returns (rows, marked_column).
+
+    Append-only by construction: the file is opened in "a" mode, so no existing row can be
+    edited or dropped by a bug in here. Every appended row carries CANDIDATE_MARK, and the
+    mark is unconditional. If the bank's header has no status-shaped column, the mark is
+    pushed onto the front of the first cell instead, because the one failure that actually
+    costs something is a machine-scraped row that reads like a curated one.
+    """
+    if not kept:
+        return 0, True
+    rows = [bank_row(c) for c in kept]
+
+    has_content = BANK_CSV.exists() and BANK_CSV.stat().st_size > 0
+    if has_content:
+        with BANK_CSV.open(newline="", encoding="utf-8") as fh:
+            header = next(csv.reader(fh), []) or list(CANDIDATE_COLUMNS)
+    else:
+        header = list(CANDIDATE_COLUMNS)
+    # A leading BOM survives into the first header cell and would otherwise stop that
+    # column from ever matching a field name.
+    norm = [h.strip().lstrip("\ufeff").lower() for h in header]
+    mark_col = next((i for i, h in enumerate(norm)
+                     if h in ("status", "stage", "state")), None)
+
+    BANK_CSV.parent.mkdir(parents=True, exist_ok=True)
+    # A bank file that does not end in a newline would swallow the first appended row into
+    # its last existing row. Cheap to check, silent and ugly to miss.
+    if has_content:
+        with BANK_CSV.open("rb") as fh:
+            fh.seek(-1, 2)
+            if fh.read(1) not in (b"\n", b"\r"):
+                with BANK_CSV.open("a", encoding="utf-8") as out:
+                    out.write("\n")
+
+    with BANK_CSV.open("a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if not has_content:
+            w.writerow(header)
+        for r in rows:
+            line = [r.get(h) or r.get(COLUMN_ALIASES.get(h, ""), "") for h in norm]
+            if mark_col is None:
+                line[0] = f"{CANDIDATE_MARK}: {line[0]}" if line[0] else CANDIDATE_MARK
+            w.writerow(line)
+    return len(rows), mark_col is not None
+
+
+def usage():
+    """The Usage block of the module docstring, verbatim, so the flag list has one owner."""
+    doc = __doc__ or ""
+    start = doc.find("Usage:")
+    end = doc.find("FAILURE CONTRACT")
+    return doc[start:end].rstrip() if start >= 0 else doc
+
+
+def main(argv):
+    argv = list(argv)
+
+    # Help is answered before anything else, and above all before any fetch. A stranger
+    # probing the tool with --help must never start a live network scan.
+    if any(a in ("-h", "--help") for a in argv):
+        print(usage())
+        return 0
+
+    def opt(flag, default):
+        if flag in argv:
+            i = argv.index(flag)
+            try:
+                v = argv[i + 1]
+            except IndexError:
+                sys.exit(f"reddit-scan: {flag} needs a value")
+            del argv[i:i + 2]
+            return v
+        return default
+
+    def intopt(flag, default):
+        """A numeric flag fails like everything else here: one line, non-zero exit. A
+        traceback from `--days abc` is exactly as unreadable as a traceback from a dead
+        socket, and the caller is exactly as stuck."""
+        raw = opt(flag, default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            sys.exit(f"reddit-scan: {flag} needs a whole number, got {raw!r}")
+
+    subs = [s.strip() for s in opt("--subs", ",".join(SEED_SUBS)).split(",") if s.strip()]
+    terms = [t.strip() for t in opt("--terms", ",".join(SEED_TERMS)).split(",") if t.strip()]
+    days = intopt("--days", "14")
+    per_query = intopt("--limit", "25")
+    min_score = intopt("--min-score", "2")
+    want_json = "--json" in argv
+    dry = "--dry-run" in argv
+    # Opt-in on purpose. The default run touches nothing outside outputs/, so a scan you
+    # fired off to see what is out there cannot quietly grow the bank.
+    append_bank = "--append-bank" in argv
+
+    state = load_state("--reset" in argv)
+    seen = set(state.get("seen_ids", []))
+    after = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+
+    found, queries, errors = {}, 0, []
+    aborted = None      # one line saying why the scan stopped early, or None
+    consecutive = 0
+    answered = 0        # queries the provider actually answered
+    for sub in subs:
+        if aborted:
+            break
+        for term in terms:
+            queries += 1
+            try:
+                d = as_get("/posts/search", {
+                    "subreddit": sub, "selftext": term, "limit": per_query,
+                    "sort": "desc", "after": after,
+                })
+            except ScanError as e:
+                # One flaky query is not a dead provider, so a single failure costs only
+                # that query. Several in a row is the provider or the network being down,
+                # and grinding through the rest of the grid turns one clear failure into a
+                # hundred slow ones. Stop, and report what the scan already has.
+                errors.append(f"r/{sub} '{term}': {e}")
+                consecutive += 1
+                if consecutive >= ABORT_AFTER:
+                    aborted = (f"stopped after {consecutive} consecutive query failures "
+                               f"at query {queries} of {len(subs) * len(terms)}. Last: {e}")
+                    print(f"reddit-scan: {aborted}", file=sys.stderr)
+                    break
+                continue
+            consecutive = 0
+            if isinstance(d, dict) and d.get("error"):
+                errors.append(f"r/{sub} '{term}': {d['error']}")
+                continue
+            answered += 1
+            for item in (d.get("data") or []):
+                pid = item.get("id")
+                if not pid or pid in found:
+                    continue
+                body = f"{item.get('title') or ''}\n{item.get('selftext') or ''}"
+                pts, tells, has_wtp = score(body, item.get("score"),
+                                            item.get("num_comments"))
+                found[pid] = {
+                    "id": pid, "subreddit": item.get("subreddit") or sub,
+                    "title": (item.get("title") or "").strip(),
+                    "body": (item.get("selftext") or "").strip(),
+                    "url": f"https://www.reddit.com/comments/{pid}",
+                    "created": datetime.fromtimestamp(
+                        item.get("created_utc") or 0, timezone.utc).strftime("%Y-%m-%d"),
+                    "upvotes": item.get("score"), "comments": item.get("num_comments"),
+                    "points": pts, "tells": tells, "wtp": has_wtp, "term": term,
+                }
+            time.sleep(0.7)  # be a good citizen on a free single-maintainer service
+
+    # The intake gate: high signal OR a WTP tell. Either alone is enough.
+    kept = [c for c in found.values()
+            if (c["points"] >= min_score or c["wtp"]) and c["id"] not in seen]
+    kept.sort(key=lambda c: (c["wtp"], c["points"], c["comments"] or 0), reverse=True)
+
+    def commit_state():
+        """Mark the reported candidates seen, and optionally append them to the bank.
+
+        Deliberately runs AFTER the run's output exists. State that says "already
+        reported" while no report was written is how a candidate disappears for good:
+        the next run skips it as seen and no file anywhere ever held it.
+        """
+        for c in kept:
+            seen.add(c["id"])
+        state["seen_ids"] = sorted(seen)
+        state["last_run"] = datetime.now(timezone.utc).isoformat()
+        state["last_run_partial"] = bool(aborted)
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps(state, indent=2))
+
+        if append_bank:
+            n, marked_column = append_to_bank(kept)
+            # Progress goes to stderr so --json output stays parseable JSON.
+            print(f"reddit-scan: appended {n} candidate rows to {BANK_CSV}",
+                  file=sys.stderr)
+            if n and not marked_column:
+                print("reddit-scan: that CSV has no Status column, so the "
+                      f'"{CANDIDATE_MARK}" mark went into the first cell of each row '
+                      "instead. Add a Status column to the bank if you want it clean.",
+                      file=sys.stderr)
+
+    # A run where nothing answered is a failed run, not a quiet market. Without this the
+    # scan reported "0 new candidates" and exited 0 with every single query dead, which is
+    # the exact failure this script's own header warns about: confidently wrong beats
+    # plainly down, so it has to be plainly down.
+    if queries and not answered and not aborted:
+        aborted = (f"no query answered, {queries} attempted, so this run scanned nothing. "
+                   "The empty result is infrastructure, not market signal")
+        print(f"reddit-scan: {aborted}", file=sys.stderr)
+    elif errors:
+        # Any network failure says so on stderr even when the run still stands up, so a
+        # thin week is never quietly a broken week.
+        print(f"reddit-scan: {len(errors)} of {queries} queries failed, see the query "
+              "errors in the report", file=sys.stderr)
+
+    header = (f"scanned {len(subs)} subreddits x {len(terms)} terms = {queries} of "
+              f"{len(subs) * len(terms)} queries run, {answered} answered, last {days} "
+              f"days | {len(found)} posts seen, {len(kept)} new candidates")
+    if aborted:
+        # Say it in the artifact, not only on stderr. A partial file that reads like a
+        # complete one is worse than no file: next week nobody remembers the scan died.
+        header = ("FAILED SCAN - " if not answered else "PARTIAL SCAN - ") + header
+    if want_json:
+        print(json.dumps({"summary": header, "candidates": kept, "errors": errors,
+                          "partial": bool(aborted), "aborted": aborted},
+                         indent=2, ensure_ascii=False))
+        if not dry:
+            commit_state()
+        return 1 if aborted else 0
+
+    L = [f"# Pain signals - {date.today().isoformat()}", "",
+         header, ""]
+    if aborted and answered:
+        L += [f"**PARTIAL RUN.** {aborted}. What follows is only what the scan completed "
+              "before it stopped, kept on purpose. The queries that never ran were never "
+              "searched, so an absence here is not evidence of no signal. Re-run to cover "
+              "them.", ""]
+    elif aborted:
+        L += [f"**FAILED RUN.** {aborted}. There is nothing below because nothing was "
+              "scanned, not because nothing was found. Re-run.", ""]
+    L += ["Intake gate: high signal OR a WTP tell (see `ai/DECISIONS.md`). The scores "
+         "below are a MECHANICAL prefilter, not the bank's rubric: intensity, the angle "
+         "you would sell against and cluster placement are reading tasks, not regex ones. "
+         "Nothing here is bank-ready until it has been curated, and promotion into "
+         "`knowledge/pain-points/pain-point-bank.csv` as anything other than a candidate "
+         "is a human act.", ""]
+    for c in kept:
+        L += [f"## [{c['points']}] {c['title']}", "",
+              f"r/{c['subreddit']} | {c['created']} | {c['upvotes']} upvotes | "
+              f"{c['comments']} comments | matched on `{c['term']}`",
+              f"tells: {', '.join(c['tells']) or 'none'}"
+              + ("  **WTP**" if c["wtp"] else ""),
+              f"{c['url']}", ""]
+        body = re.sub(r"\s+", " ", c["body"])[:700]
+        if body:
+            L += ["> " + body + ("..." if len(c["body"]) > 700 else ""), ""]
+    if errors:
+        L += ["## Query errors", ""] + [f"- {e}" for e in errors]
+    text = "\n".join(L)
+
+    if dry:
+        print(text)
+        return 1 if aborted else 0
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    md = OUT_DIR / f"{date.today().isoformat()}.md"
+    md.write_text(text)
+    (OUT_DIR / f"{date.today().isoformat()}.json").write_text(
+        json.dumps({"summary": header, "candidates": kept, "errors": errors,
+                    "partial": bool(aborted), "aborted": aborted},
+                   indent=2, ensure_ascii=False))
+    commit_state()
+    print(header)
+    print(f"written to {md}")
+    return 1 if aborted else 0
+
+
+if __name__ == "__main__":
+    # Exit code carries the verdict: 0 clean, 1 partial or failed. An agent that only
+    # reads stdout still learns the run did not finish.
+    sys.exit(main(sys.argv[1:]))

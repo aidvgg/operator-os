@@ -1,0 +1,12 @@
+#!/bin/sh
+# Blocks commits on HARD repo-doctor violations (secrets, protected paths, fake
+# office files, outputs/raw dupes). Escape hatch has TWO independent parts:
+#   - `git commit --no-verify` skips THIS run entirely (this hook doesn't fire).
+#   - a `.repo-doctor-allow` entry is what keeps the NEXT commit green. An
+#     expired or missing entry is itself a HARD violation.
+# So --no-verify WITHOUT also writing the allow entry just defers the block to PUSH
+# time, not to the next commit: staged mode only ever reads `git diff --cached`, so a
+# file committed once with --no-verify is never looked at again unless something
+# re-stages it. The backstop is `.githooks/pre-push`, which scans EVERY commit in the
+# pushed range in full, not just the tip. Do both, or don't bypass.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/repo-doctor" --staged

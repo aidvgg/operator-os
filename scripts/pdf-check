@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""pdf-check - the canonical real-app open test for generated .pdf files.
+
+Usage:
+  scripts/pdf-check <file.pdf> [<file.pdf> ...] [--expect "string"]... [--no-font-check]
+  scripts/pdf-check --selftest      prove the checker still rejects known-bad files
+
+The PDF sibling of scripts/docx-check, same provenance and same rule: a generated
+deliverable is not delivered until something that is not the generator can open it
+(ai/ERRORS.md). Wired into skills/proposal-creator AND skills/invoice-creator for
+the HTML->PDF document standard.
+
+Per .pdf, in order (first failure wins):
+  1. header - file starts with %PDF-1.x and carries %%EOF near the end
+  2. pages  - pdfinfo (poppler) parses it and reports >= 1 page
+  3. text   - pdftotext extracts non-empty visible text
+  4. fonts  - pdffonts reports every used font as embedded (subset ok);
+              an unembedded font renders differently on the client's
+              machine. Disable only with --no-font-check.
+  5. render - (darwin only) qlmanage produces a Quick Look thumbnail, i.e.
+              macOS's own PDF engine opens the file; on other platforms the
+              stage is skipped and PASS is annotated `(render stage skipped:
+              Quick Look is macOS-only)`, so a Linux pass is never mistaken
+              for a five-stage pass
+  6. expect - every --expect string appears in the extracted text
+              (use for the client name and the total)
+
+Requires poppler for pdfinfo/pdftotext/pdffonts (brew install poppler on macOS,
+apt install poppler-utils on Debian/Ubuntu); their absence is a hard FAIL, never a
+silent pass.
+
+Prints `PASS <file>` or `FAIL <file> [<stage>]: <reason>` per file.
+Exit 1 if any file FAILs (or any argv path is unusable), 0 otherwise.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+POPPLER_HINT = "poppler tools missing (brew install poppler); refusing to pass unverified"
+
+
+def run(cmd, timeout=30):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def check(path, expects, font_check=True):
+    """Return (ok, stage, reason). stage/reason meaningful only when not ok."""
+    if not os.path.isfile(path):
+        return False, "open", "not a file"
+
+    # Stage 1: header/trailer shape.
+    with open(path, "rb") as f:
+        head = f.read(16)
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        f.seek(max(0, size - 2048))
+        tail = f.read()
+    if not head.startswith(b"%PDF-1."):
+        return False, "header", "no %PDF-1.x header (a text file with a .pdf name?)"
+    if b"%%EOF" not in tail:
+        return False, "header", "no %%EOF trailer in the last 2KB (truncated?)"
+
+    for tool in ("pdfinfo", "pdftotext", "pdffonts"):
+        if shutil.which(tool) is None:
+            return False, "tools", POPPLER_HINT
+
+    # Stage 2: structural parse + page count.
+    info = run(["pdfinfo", path])
+    if info.returncode != 0:
+        return False, "pages", f"pdfinfo failed: {(info.stderr or '').strip()[:200]}"
+    pages = 0
+    for line in info.stdout.splitlines():
+        if line.startswith("Pages:"):
+            try:
+                pages = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+    if pages < 1:
+        return False, "pages", "pdfinfo reports no pages"
+
+    # Stage 3: non-empty extracted text.
+    txt = run(["pdftotext", path, "-"])
+    if txt.returncode != 0:
+        return False, "text", f"pdftotext failed: {(txt.stderr or '').strip()[:200]}"
+    text = txt.stdout.strip()
+    if not text:
+        return False, "text", "extracted text is empty (blank render?)"
+
+    # Stage 4: every used font embedded.
+    if font_check:
+        fonts = run(["pdffonts", path])
+        if fonts.returncode != 0:
+            return False, "fonts", f"pdffonts failed: {(fonts.stderr or '').strip()[:200]}"
+        lines = fonts.stdout.splitlines()
+        # header row + dashes row, then one row per font; 'emb' is column 4 from
+        # the right in poppler's fixed layout, but parse by header offset to be safe
+        if len(lines) >= 2 and "emb" in lines[0]:
+            emb_col = lines[0].index("emb")
+            for row in lines[2:]:
+                if len(row) > emb_col and row[emb_col:emb_col + 3] == "no ":
+                    return False, "fonts", f"unembedded font: {row.split()[0]} (renders differently off this machine)"
+
+    # Stage 5: real-app open via Quick Look (darwin only).
+    if sys.platform == "darwin" and shutil.which("qlmanage"):
+        with tempfile.TemporaryDirectory() as td:
+            run(["qlmanage", "-t", "-s", "64", "-o", td, path], timeout=60)
+            made = [f for f in os.listdir(td) if f.lower().endswith(".png")]
+            if not made:
+                return False, "render", "Quick Look could not render a thumbnail (macOS PDF engine rejects the file)"
+
+    # Stage 6: expected strings.
+    for needle in expects:
+        if needle not in text:
+            return False, "expect", f'extracted text does not contain "{needle}"'
+
+    return True, "", ""
+
+
+# ------------------------------------------------------------- selftest ----
+def _minimal_pdf(text="pdf-check selftest fixture"):
+    """A hand-built single-page PDF using base-14 Helvetica (NOT embedded)."""
+    objs = []
+    objs.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objs.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>")
+    stream = f"BT /F1 24 Tf 72 700 Td ({text}) Tj ET".encode()
+    objs.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for off in offsets[1:]:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_at}\n%%EOF\n").encode()
+    return bytes(out)
+
+
+def selftest():
+    ok = True
+    with tempfile.TemporaryDirectory() as td:
+        good = os.path.join(td, "good.pdf")
+        with open(good, "wb") as f:
+            f.write(_minimal_pdf())
+        trunc = os.path.join(td, "truncated.pdf")
+        with open(trunc, "wb") as f:
+            f.write(_minimal_pdf()[: int(len(_minimal_pdf()) * 0.5)])
+        fake = os.path.join(td, "fake.pdf")
+        with open(fake, "w") as f:
+            f.write("just markdown pretending\n")
+
+        cases = [
+            ("good, fonts check off", good, [], False, True, None),
+            ("good, fonts check ON (base14 not embedded)", good, [], True, False, "fonts"),
+            ("good, expect present", good, ["fixture"], False, True, None),
+            ("good, expect missing", good, ["$99,999"], False, False, "expect"),
+            ("truncated", trunc, [], False, False, None),
+            ("fake text file", fake, [], False, False, "header"),
+        ]
+        for label, p, expects, fonts_on, want_ok, want_stage in cases:
+            got_ok, stage, reason = check(p, expects, font_check=fonts_on)
+            verdict = got_ok == want_ok and (want_stage is None or stage == want_stage)
+            print(f"{'ok ' if verdict else 'BAD'} selftest [{label}]: ok={got_ok} stage={stage or '-'} {reason}")
+            if not verdict:
+                ok = False
+    print("SELFTEST", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+RENDER_SKIP_NOTE = "render stage skipped: Quick Look (qlmanage) is macOS-only"
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or "--help" in args or "-h" in args:
+        # Print the whole Usage block, not just its heading: a usage message that stops at
+        # the word "Usage:" tells the caller nothing it did not already know.
+        doc = __doc__.strip().splitlines()
+        start = next((i for i, l in enumerate(doc) if l.startswith("Usage:")), 0)
+        end = start + 1
+        while end < len(doc) and doc[end].strip():
+            end += 1
+        print("\n".join(doc[start:end]))
+        return 0 if args else 2
+    if args == ["--selftest"]:
+        return selftest()
+
+    expects = []
+    files = []
+    font_check = True
+    i = 0
+    while i < len(args):
+        if args[i] == "--expect":
+            i += 1
+            expects.append(args[i])
+        elif args[i] == "--no-font-check":
+            font_check = False
+        else:
+            files.append(args[i])
+        i += 1
+
+    bad = 0
+    for path in files:
+        ok, stage, reason = check(path, expects, font_check=font_check)
+        if ok:
+            note = "" if sys.platform == "darwin" else f"  ({RENDER_SKIP_NOTE})"
+            print(f"PASS {path}{note}")
+        else:
+            print(f"FAIL {path} [{stage}]: {reason}")
+            bad += 1
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

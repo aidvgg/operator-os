@@ -1,0 +1,43 @@
+# Quarantined inbox. Exports, third-party documents, anything dumped in before it has been
+# read. Nothing here is treated as truth until a session distils it into knowledge/, so
+# nothing here is pushed. If it mattered, it got promoted; if it never got promoted, it was
+# never worth publishing.
+raw/
+
+# The live wire block. One file holds the real bank and payment-rail values and it is the
+# only place they exist. The committed sibling is PAYMENT-DETAILS.template.md, the
+# placeholder scaffold. Keeping the two apart is what stops an account number reaching git.
+knowledge/business/invoices/PAYMENT-DETAILS.md
+
+# Issued invoices embed that wire block by design, so a generated invoice is structurally
+# not committable. The archive is your cloud drive, not this repo.
+outputs/invoices/
+
+# Personal and sensitive operating material: tax paperwork, statements, payment receipts,
+# banking notes, backup logs, brief runs that carry prospect names. None of it is business
+# machinery and all of it is what a shared clone must not carry.
+personal/
+outputs/ops/
+
+# Research runs pull contact details out of public sources. The committed report cites this
+# path, the local copy holds the unredacted values, and the two never merge.
+outputs/research/*/local/
+
+# Local machine state, not repo state
+.backup-marker
+.DS_Store
+**/.DS_Store
+.claude/settings.local.json
+
+# Build artifacts
+__pycache__/
+*.pyc
+node_modules/
+
+# Provider API keys for scripts/x-fetch and scripts/li-fetch. .env.example documents which
+# keys exist without holding any value. The real values live here, are read only by those
+# scripts inside their own process, and are off-limits to every AI tool: the deny rules in
+# .claude/settings.json and the PreToolUse guard in .claude/hooks/deny-env-access.py enforce
+# it. Agents call the scripts, never the file.
+.env
+.env.local

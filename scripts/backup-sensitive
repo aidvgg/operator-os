@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""backup-sensitive - encrypt the local-only sensitive set and push it off-site.
+
+Frictionless off-site backup of everything repo-doctor protects (never-committed payment
+details, tax filings, personal banking notes, the invoice archive, raw dumps) plus
+PAYMENT-DETAILS.md, and optionally one directory that lives outside the repo and outside
+git entirely.
+
+Usage:
+  scripts/backup-sensitive                 build, prove, upload, write .backup-marker
+  scripts/backup-sensitive --verify        download the object the marker names and prove it
+  scripts/backup-sensitive --verify --ask-pass   same, passphrase typed in, Keychain not read
+  scripts/backup-sensitive --init          ONE TIME: mint and store the passphrase. This is
+                                           the only path that creates a key. Every other
+                                           mode reads, and fails loudly if it cannot.
+  scripts/backup-sensitive --ask-pass      build with a typed passphrase (no store read)
+  scripts/backup-sensitive --help          print this text and exit
+
+Flow:
+  scripts/repo-doctor --print-protected  -> the protected path set (one source of truth)
+  tar (relative paths, missing skipped)  -> append the external dir -> record sha256
+  encrypt (aes-256-cbc, pbkdf2)          -> HMAC-SHA256 over the ciphertext (encrypt-then-MAC)
+  RESTORE TEST                           -> decrypt, byte-compare against the tar's sha256,
+                                            list members, assert the canary file is present
+  rclone copyto <remote>/                -> .enc + a .hmac sidecar -> remote md5 verify
+  .backup-marker                         <- date, object name, md5, hmac, bytes, members,
+                                            restore=ok  (horizon reads these fields)
+  passphrase                             <- OPERATOR_OS_BACKUP_PASSPHRASE_FILE if set (any
+                                            platform), else the macOS Keychain on darwin
+                                            (security find-generic-password); minted only
+                                            by --init; --ask-pass types it instead
+
+Why encrypt-then-MAC and not an AEAD cipher: `openssl enc` answers "AEAD ciphers not
+supported" on current OpenSSL, and `age` is not assumed present. aes-256-cbc alone is
+unauthenticated, and comparing md5 of the ciphertext only ever proved transport, so an
+already corrupt tar would upload and "verify" clean. The HMAC key is a PBKDF2 stretch of the
+same passphrase, so any restore recomputes it from the password-manager copy alone, with no
+extra secret to lose.
+
+Portability note worth re-checking on your own machine before you lean on it: archives
+written under `-pbkdf2` round-trip interchangeably between a Homebrew OpenSSL 3.x and the
+macOS system LibreSSL, so a bare-metal restore needs no Homebrew.
+
+Nothing is ever deleted from the remote. Objects are named by date AND a content hash, so a
+same-day rerun cannot overwrite the object the marker points at.
+
+The passphrase is NEVER printed to stdout. It lives only in the passphrase store and (on
+--init) a one-time recovery file under outputs/ops/ (gitignored) to be moved into a password
+manager.
+
+PASSPHRASE STORE, per platform. On macOS the default store is the login Keychain (account and
+service constants below). On Linux and anywhere else there is no Keychain, so set
+OPERATOR_OS_BACKUP_PASSPHRASE_FILE to an absolute path of a file that holds the passphrase on
+its first line, mode 0600, outside the repo (for example ~/.config/operator-os/backup-pass).
+`--init` with that variable set mints the passphrase into that file. The variable wins on
+every platform when set, so a macOS operator may use it too. Without either store, every
+mode fails with one line naming this paragraph, and --ask-pass remains the manual escape.
+
+Rides /weekly as one line. horizon nags once the marker's own date token is >21 days old, and
+separately if the marker carries no hmac= / restore=ok (it predates authenticated integrity).
+Runs unattended too: scripts/weekly-backup drives this from a launchd agent, so the build
+path takes a non-blocking writer lock and a second concurrent run exits 3 rather than
+building a competing archive. --verify is not locked.
+
+Exit 0 on success, 3 when another run already holds the writer lock, non-zero otherwise
+(nothing is marked done unless the archive decrypts AND the upload verifies).
+"""
+import fcntl
+import getpass
+import hashlib
+import hmac
+import os
+import secrets
+import shutil
+import string
+import subprocess
+import sys
+import tempfile
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True).stdout.strip() or ".")
+KEYCHAIN_ACCOUNT = "operator-os"
+KEYCHAIN_SERVICE = "operator-os-backup"
+# Non-Keychain store: a 0600 file named by this variable, first line = passphrase. Wins on
+# every platform when set; the only store on non-darwin hosts.
+PASSPHRASE_FILE = os.environ.get("OPERATOR_OS_BACKUP_PASSPHRASE_FILE", "").strip()
+IS_DARWIN = sys.platform == "darwin"
+REMOTE_DIR = os.environ.get("OPERATOR_OS_BACKUP_REMOTE", "gdrive:Backups")
+MARKER = ROOT / ".backup-marker"
+# One writer at a time. scripts/weekly-backup runs this unattended on a launchd schedule,
+# so a manual run and the scheduled run can genuinely overlap. Both contend on this lock.
+# It lives under the gitignored outputs/ops/ rather than in the repo root so it never shows
+# up as an untracked file. --verify is deliberately NOT locked: the disaster drill reads
+# only, and must never be blocked by a backup that is mid-flight. That "reads only" claim is
+# only true because minting lives behind --init alone; an earlier cut had --verify calling a
+# get_passphrase() that minted on any unsuccessful keychain read, which made the read-only
+# drill able to re-key every future archive. See get_passphrase below.
+LOCK_FILE = ROOT / "outputs/ops/.backup-sensitive.lock"
+LOCK_BUSY = 3
+RECOVERY_FILE = ROOT / "outputs/ops/backup-passphrase-MOVE-TO-PASSWORD-MANAGER.txt"
+# Always-included sensitive files that print-protected either lowercases or emits as a bare
+# basename (the "/" filter below drops those), so they must be named explicitly. Add your own
+# always-include paths here; they are repo-relative and silently skipped when absent.
+EXPLICIT = ["knowledge/business/invoices/PAYMENT-DETAILS.md"]
+# The one member the restore test insists on. It is the file this whole script exists to
+# protect, so an archive without it is not the protected set however well it decrypts.
+CANARY = "PAYMENT-DETAILS.md"
+CANARY_TEMPLATE = "knowledge/business/invoices/PAYMENT-DETAILS.template.md"
+# Build artifacts reach the protected set through .gitignore. They are derived and
+# replaceable, and node_modules alone was 10 MB of churn in every archive. Never backed up.
+DENY_TOP = {"node_modules", "__pycache__"}
+
+# --- Optional: one directory OUTSIDE the repo, archived as a tar member. ------------------
+# Agent harnesses keep an auto-memory directory outside the repo, outside git and outside
+# repo-doctor's scan. CLAUDE.md requires any control kept there to have a git-resident owner
+# under knowledge/, so the copy in that directory is a mirror rather than the record, but a
+# mirror is still worth carrying off-site and a machine loss otherwise takes it silently.
+#
+# OPTIONAL BY DEFAULT. Set OPERATOR_OS_EXTRA_DIR to an absolute path to archive one. Leave it
+# unset and the archive simply does not carry an external member, and says so.
+#
+# Declared means mandatory. If the variable is set and the path does not resolve, the run
+# DIES rather than warning, because a declared member that quietly drops out produces a run
+# that reports success while the thing you asked for is missing, which is the exact shape
+# this script exists to prevent: a backup that looks taken and is not. The path is often
+# derived from $HOME and the repo location, both of which differ between a shell and a
+# launchd job, so a non-resolving declared path is a real and likely failure, not a
+# hypothetical. There is deliberately no "skip anyway" flag: an override on a proof is a way
+# to turn the proof off.
+EXTRA_DIR = os.environ.get("OPERATOR_OS_EXTRA_DIR", "").strip()
+EXTRA_MEMBER = "external-memory"
+HMAC_CONTEXT = b"operator-os-backup-hmac-v1"
+HMAC_ITERS = 200_000
+
+
+def die(msg: str) -> int:
+    print(f"backup-sensitive: FAILED - {msg}", file=sys.stderr)
+    return 1
+
+
+def real_case(rel: str):
+    """Resolve a possibly wrong-cased relative path to its real on-disk casing.
+    Returns None if no case-variant exists. macOS FS is case-insensitive, but tar stores
+    the literal string given, so we must feed it the true case for a clean restore."""
+    parts = Path(rel).parts
+    cur = ROOT
+    out = []
+    for part in parts:
+        if not cur.is_dir():
+            return None
+        match = next((c.name for c in cur.iterdir() if c.name.lower() == part.lower()), None)
+        if match is None:
+            return None
+        out.append(match)
+        cur = cur / match
+    return "/".join(out)
+
+
+def collect_paths():
+    """Returns (paths, denied). `denied` is printed so a thinned archive is never silent."""
+    r = subprocess.run([str(ROOT / "scripts/repo-doctor"), "--print-protected"],
+                       capture_output=True, text=True, cwd=ROOT)
+    if r.returncode != 0:
+        raise RuntimeError(f"repo-doctor --print-protected exited {r.returncode}: {r.stderr.strip()}")
+    seen, paths, denied = set(), [], []
+    for ln in [x.strip() for x in r.stdout.splitlines()]:
+        if not ln or "*" in ln or "/" not in ln:  # globs + bare basenames skipped
+            continue
+        top = ln.rstrip("/").split("/")[0]
+        if top in DENY_TOP:
+            if top not in denied:
+                denied.append(top)
+            continue
+        rel = real_case(ln.rstrip("/"))
+        if rel is None or rel in seen:            # skip missing + case-dedupe
+            continue
+        seen.add(rel)
+        paths.append(rel)
+    for ln in EXPLICIT:                           # always included, no shape filtering
+        rel = real_case(ln)
+        if rel is None or rel in seen:
+            continue
+        seen.add(rel)
+        paths.append(rel)
+    return sorted(paths), denied
+
+
+def _passphrase_from_file(create: bool = False) -> str:
+    """The non-Keychain store. Same contract as the Keychain branch: read, never mint,
+    unless `create` (--init) is set; an existing non-empty file is never overwritten."""
+    fp = Path(PASSPHRASE_FILE).expanduser()
+    if fp.is_file():
+        pw = fp.read_text(encoding="utf-8").splitlines()[0].strip() if fp.stat().st_size else ""
+        if pw:
+            mode = fp.stat().st_mode & 0o777
+            if mode & 0o077:
+                print(f"backup-sensitive: WARN {fp} is mode {mode:o}; chmod 600 it", file=sys.stderr)
+            return pw
+        if not create:
+            raise RuntimeError(f"OPERATOR_OS_BACKUP_PASSPHRASE_FILE={fp} exists but is empty. "
+                               f"Run `scripts/backup-sensitive --init` once to mint into it.")
+    elif not create:
+        raise RuntimeError(
+            f"OPERATOR_OS_BACKUP_PASSPHRASE_FILE={fp} does not exist. This command does not "
+            f"create one. Run `scripts/backup-sensitive --init` once to mint and store it "
+            f"there, or pass --ask-pass to supply it by hand.")
+    if RECOVERY_FILE.exists():
+        raise RuntimeError(
+            f"{RECOVERY_FILE} already exists. It holds a passphrase that was minted and never "
+            f"moved into a password manager. Refusing to overwrite it: that file may be the only "
+            f"copy of the key to an existing archive. Move it, then re-run --init.")
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_=+"
+    pw = "".join(secrets.choice(alphabet) for _ in range(32))
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(fp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(pw + "\n")
+    os.chmod(fp, 0o600)
+    RECOVERY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(RECOVERY_FILE, "x") as fh:
+        fh.write(f"Operator OS backup passphrase (store: OPERATOR_OS_BACKUP_PASSPHRASE_FILE={fp}). "
+                 "Move this into your password manager, then delete this file.\n"
+                 f"{pw}\n")
+    os.chmod(RECOVERY_FILE, 0o600)
+    print(f"backup-sensitive: generated a new passphrase, stored in {fp} + wrote recovery copy "
+          f"to {RECOVERY_FILE.relative_to(ROOT)} (move to password manager, then delete)")
+    return pw
+
+
+def get_passphrase(create: bool = False) -> str:
+    r"""Read the backup passphrase from the passphrase store (Keychain or file).
+
+    `create` DEFAULTS TO FALSE, and that default is the whole point. An earlier cut of this
+    function treated ANY unsuccessful `security` result as "first run" and minted a fresh
+    32-char passphrase, stored it, and dropped a recovery file. Three states are not first run
+    and were all silently treated as one: a LOCKED keychain, a user who DENIED the access
+    prompt, and a keychain that is simply unreadable. Worse, `--verify`, documented in this
+    file's own header as a read-only disaster drill, called it. So the drill could mint a new
+    key, every subsequent backup would encrypt under a value that exists in no password
+    manager, and the HMAC comparison would then fail with "the remote archive is not authentic
+    (wrong key, or tampered)", reporting key loss as tampering.
+
+    Absence now means EXACTLY rc 44, `security`'s documented "item not found". Anything else is
+    an error and raises. Minting lives only behind an explicit `--init`.
+
+    Store dispatch: OPERATOR_OS_BACKUP_PASSPHRASE_FILE when set (any platform); else the
+    Keychain, which exists only on darwin; else a one-line refusal that names the fix.
+    """
+    if PASSPHRASE_FILE:
+        return _passphrase_from_file(create)
+    if not IS_DARWIN:
+        raise RuntimeError(
+            f"the macOS Keychain is not available on this platform ({sys.platform}). Set "
+            f"OPERATOR_OS_BACKUP_PASSPHRASE_FILE to a 0600 file outside the repo holding the "
+            f"passphrase (run `scripts/backup-sensitive --init` once with it set to mint one), "
+            f"or pass --ask-pass to type it. See the PASSPHRASE STORE paragraph in this script.")
+    r = subprocess.run(["security", "find-generic-password",
+                        "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
+                       capture_output=True, text=True, timeout=15)
+    # timeout: a locked keychain can block on the GUI unlock prompt forever, and this runs from
+    # a launchd job with no session to prompt into.
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.rstrip("\n")
+    if r.returncode != 44:
+        raise RuntimeError(
+            f"security find-generic-password exited {r.returncode} "
+            f"({r.stderr.strip()[:160] or 'no stderr'}). That is NOT 'no such item' (rc 44), so "
+            f"the passphrase may exist and simply be unreadable: a locked keychain, a denied "
+            f"access prompt, or a keychain error. Refusing to mint a replacement, because doing "
+            f"so would re-key every future archive away from your password-manager copy. Unlock "
+            f"the keychain and retry, or pass --ask-pass to type it.")
+    if not create:
+        raise RuntimeError(
+            f"no backup passphrase in the Keychain (account={KEYCHAIN_ACCOUNT} "
+            f"service={KEYCHAIN_SERVICE}). This command does not create one. Run "
+            f"`scripts/backup-sensitive --init` once to mint and store it, or pass --ask-pass "
+            f"to supply it by hand.")
+    # --init only. Mint a strong passphrase, store it, leave a one-time recovery copy.
+    if RECOVERY_FILE.exists():
+        raise RuntimeError(
+            f"{RECOVERY_FILE} already exists. It holds a passphrase that was minted and never "
+            f"moved into a password manager. Refusing to overwrite it: that file may be the only "
+            f"copy of the key to an existing archive. Move it, then re-run --init.")
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_=+"
+    pw = "".join(secrets.choice(alphabet) for _ in range(32))
+    add = subprocess.run(["security", "add-generic-password",
+                          "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w", pw],
+                         capture_output=True, text=True, timeout=15)
+    if add.returncode != 0:
+        raise RuntimeError(f"security add-generic-password failed: {add.stderr.strip()}")
+    RECOVERY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(RECOVERY_FILE, "x") as fh:      # x: never clobber, belt and braces with the check
+        fh.write(
+            f"Operator OS backup passphrase (Keychain: account={KEYCHAIN_ACCOUNT} "
+            f"service={KEYCHAIN_SERVICE}). "
+            "Move this into your password manager, then delete this file.\n"
+            f"{pw}\n")
+    os.chmod(RECOVERY_FILE, 0o600)
+    print(f"backup-sensitive: generated a new passphrase, stored in Keychain + wrote recovery copy "
+          f"to {RECOVERY_FILE.relative_to(ROOT)} (move to password manager, then delete)")
+    return pw
+
+
+def _digest(path: Path, h) -> str:
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def md5_local(path: Path) -> str:
+    return _digest(path, hashlib.md5())
+
+
+def sha256_local(path: Path) -> str:
+    return _digest(path, hashlib.sha256())
+
+
+def hmac_local(path: Path, passphrase: str) -> str:
+    """Encrypt-then-MAC. openssl enc refuses AEAD ciphers, so authenticity rides on a
+    separate HMAC over the ciphertext, keyed by a PBKDF2 stretch of the same passphrase.
+    Deterministic, so any restore recomputes it from the password-manager copy alone."""
+    key = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), HMAC_CONTEXT, HMAC_ITERS)
+    return _digest(path, hmac.new(key, digestmod=hashlib.sha256))
+
+
+def decrypt_to(enc_path: Path, out_path: Path, passphrase: str):
+    """Returns None on success, an error string otherwise."""
+    d = subprocess.run(
+        ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
+         "-in", str(enc_path), "-out", str(out_path), "-pass", "stdin"],
+        input=passphrase, capture_output=True, text=True)
+    if d.returncode != 0 or not out_path.is_file():
+        return f"openssl decrypt failed: {d.stderr.strip() or 'exit %d' % d.returncode}"
+    return None
+
+
+def tar_members(path: Path):
+    """Member list of a tar, or None if it cannot be listed."""
+    r = subprocess.run(["tar", "-tf", str(path)], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    return [x for x in r.stdout.splitlines() if x.strip()]
+
+
+def verify_remote(ask_pass: bool) -> int:
+    """Disaster-recovery drill. Downloads the object the marker names, checks size, md5 and
+    HMAC, decrypts it and lists it. Never writes the marker. With --ask-pass the passphrase
+    is typed in rather than read from the Keychain, which is the real scenario: a lost
+    laptop is a lost Keychain, and the passphrase lives in the password manager."""
+    if not MARKER.is_file():
+        return die("no .backup-marker, nothing to verify")
+    body = MARKER.read_text().split()
+    if len(body) < 2:
+        return die(f"unreadable .backup-marker: {MARKER.read_text()!r}")
+    name = body[1]
+    fields = dict(p.split("=", 1) for p in body if "=" in p)
+    passphrase = getpass.getpass("backup passphrase: ") if ask_pass else get_passphrase()
+    tmp = Path(tempfile.mkdtemp(prefix="operator-os-verify-"))
+    enc_path, round_path = tmp / name, tmp / "roundtrip.tar"
+    try:
+        dl = subprocess.run(["rclone", "copyto", f"{REMOTE_DIR}/{name}", str(enc_path)],
+                            capture_output=True, text=True)
+        if dl.returncode != 0:
+            return die(f"rclone download failed: {dl.stderr.strip()}")
+        size = enc_path.stat().st_size
+        if "bytes" in fields and str(size) != fields["bytes"]:
+            return die(f"size mismatch: remote {size} != marker {fields['bytes']}")
+        if "md5" in fields and md5_local(enc_path) != fields["md5"]:
+            return die("md5 mismatch between the remote object and the marker")
+        if "hmac" in fields and not hmac.compare_digest(hmac_local(enc_path, passphrase),
+                                                        fields["hmac"]):
+            return die("HMAC mismatch: the remote archive is not authentic (wrong key, or tampered)")
+        err = decrypt_to(enc_path, round_path, passphrase)
+        if err:
+            return die(err)
+        listed = tar_members(round_path)
+        if listed is None:
+            return die("the archive decrypted but cannot be listed as a tar")
+        if not any(CANARY in x for x in listed):
+            return die(f"{CANARY} is missing from the decrypted archive")
+        proof = "md5 + HMAC match" if "hmac" in fields else "md5 matches (marker predates HMAC)"
+        print(f"backup-sensitive: VERIFIED {name}, {size} bytes, {proof}, decrypts, "
+              f"{len(listed)} members")
+        for x in listed[:20]:
+            print("   ", x)
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main() -> int:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print((__doc__ or "").strip())
+        return 0
+    if "--init" in sys.argv:
+        # The ONLY path that may mint. Explicit, interactive, and separate from every run that
+        # merely needs to read the key.
+        try:
+            get_passphrase(create=True)
+        except RuntimeError as e:
+            print(f"backup-sensitive: --init FAILED: {e}")
+            return 2
+        print("backup-sensitive: passphrase ready. Move the recovery file into your password "
+              "manager and delete it, then run a normal backup.")
+        return 0
+    if "--verify" in sys.argv:
+        return verify_remote("--ask-pass" in sys.argv)
+
+    # Take the writer lock before anything is built. Non-blocking on purpose: the loser
+    # reports and exits LOCK_BUSY, which scripts/weekly-backup reads as "skipped", not
+    # "failed". Held for the whole run, released when the process exits.
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_fh = open(LOCK_FILE, "w")
+    except OSError as e:
+        return die(f"cannot open the writer lock {LOCK_FILE}: {e}")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("backup-sensitive: another run holds the writer lock, skipping this one",
+              file=sys.stderr)
+        return LOCK_BUSY
+
+    try:
+        paths, denied = collect_paths()
+    except RuntimeError as e:
+        return die(str(e))
+    if not paths:
+        return die("no protected paths found on disk - refusing to upload an empty archive")
+
+    tmp = Path(tempfile.mkdtemp(prefix="operator-os-backup-"))
+    tar_path = tmp / "payload.tar"
+    enc_path = tmp / "payload.tar.enc"
+    round_path = tmp / "roundtrip.tar"
+    try:
+        try:
+            passphrase = (getpass.getpass("backup passphrase: ") if "--ask-pass" in sys.argv
+                          else get_passphrase())
+        except RuntimeError as e:
+            return die(str(e))
+        if denied:
+            print(f"backup-sensitive: excluded derived build artifacts: {', '.join(sorted(denied))}")
+
+        # tar with relative paths (archive members stay repo-relative for a clean restore)
+        tar = subprocess.run(["tar", "-cf", str(tar_path), "-C", str(ROOT), *paths],
+                             capture_output=True, text=True)
+        if tar.returncode != 0:
+            return die(f"tar failed: {tar.stderr.strip()}")
+
+        # Append the declared external directory under a clear archive name. Copy-then-append
+        # keeps this portable (no bsdtar -s / GNU --transform divergence). Missing while
+        # declared is FATAL, never a warning: see the EXTRA_DIR block at the top.
+        if EXTRA_DIR:
+            extra = Path(EXTRA_DIR).expanduser()
+            if not extra.is_dir():
+                return die(f"OPERATOR_OS_EXTRA_DIR is set to {extra} and that is not a "
+                           f"directory. You declared it, so the archive is incomplete without "
+                           f"it. NOTHING ELSE GETS BACKED UP EITHER until this is fixed: no "
+                           f"marker is written and the previous archive stays the newest, so "
+                           f"the freshness nag keeps counting. Check whether the directory was "
+                           f"renamed, or unset the variable if you no longer want it archived.")
+            stage = tmp / "stage"
+            stage.mkdir(exist_ok=True)
+            shutil.copytree(extra, stage / EXTRA_MEMBER, dirs_exist_ok=True)
+            app = subprocess.run(["tar", "-rf", str(tar_path), "-C", str(stage), EXTRA_MEMBER],
+                                 capture_output=True, text=True)
+            if app.returncode != 0:
+                return die(f"tar append ({EXTRA_MEMBER}) failed: {app.stderr.strip()}")
+            shutil.rmtree(stage, ignore_errors=True)
+        else:
+            print("backup-sensitive: no OPERATOR_OS_EXTRA_DIR declared, archiving repo paths only")
+
+        tar_sha = sha256_local(tar_path)
+        listed_pre = tar_members(tar_path)
+        if listed_pre is None:
+            return die("the tar just built cannot be listed")
+        members = len(listed_pre)
+
+        # encrypt; passphrase fed via stdin so it never lands in argv/ps output
+        enc = subprocess.run(
+            ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
+             "-in", str(tar_path), "-out", str(enc_path), "-pass", "stdin"],
+            input=passphrase, capture_output=True, text=True)
+        if enc.returncode != 0 or not enc_path.is_file():
+            return die(f"openssl encrypt failed: {enc.stderr.strip()}")
+
+        size = enc_path.stat().st_size
+        local_md5 = md5_local(enc_path)
+        local_hmac = hmac_local(enc_path, passphrase)
+        # Date AND content hash: a second run on the same day gets its own object, so the
+        # object the marker points at is never overwritten by a later, possibly failed run.
+        name = f"operator-os-sensitive-{date.today().isoformat()}-{local_md5[:8]}.tar.enc"
+
+        # RESTORE TEST, before the upload. Never ship an archive that has not been proven to
+        # decrypt. md5-equal ciphertext only ever proved transport (ai/ERRORS.md Hazards
+        # `backup-unproven`). Dropping the tar first halves peak disk; the sources are all
+        # still on disk, and tar_sha is the reference we compare against.
+        tar_path.unlink()
+        err = decrypt_to(enc_path, round_path, passphrase)
+        if err:
+            return die(f"restore test failed: {err}")
+        if sha256_local(round_path) != tar_sha:
+            return die("restore test failed: the decrypted archive does not match the tar "
+                       "that was encrypted")
+        listed = tar_members(round_path)
+        if listed is None:
+            return die("restore test failed: the decrypted archive cannot be listed as a tar")
+        if not any(CANARY in x for x in listed):
+            return die(f"restore test failed: {CANARY} missing from the decrypted archive. On a "
+                       f"fresh clone that file does not exist yet - copy {CANARY_TEMPLATE} to "
+                       f"{CANARY} and fill it in before you rely on this backup.")
+        if EXTRA_DIR:
+            # A tar directory entry ("<member>/") would satisfy a bare prefix test, so an
+            # EMPTY copy of the directory could pass the proof. Require at least one real file.
+            _extra = [x for x in listed
+                      if x.startswith(EXTRA_MEMBER) and not x.endswith("/")]
+            if not _extra:
+                return die(f"restore test failed: the decrypted archive carries no {EXTRA_MEMBER} "
+                           f"FILE (directory entries alone do not count; found "
+                           f"{sum(1 for x in listed if x.startswith(EXTRA_MEMBER))} "
+                           f"entries, none of them a file)")
+        round_path.unlink()
+        print(f"backup-sensitive: restore test OK ({len(listed)} members decrypted and listed)")
+
+        # sidecar: lets a bare-metal restore verify authenticity without this laptop's marker
+        sidecar_path = tmp / (name + ".hmac")
+        sidecar_path.write_text(
+            f"file={name}\nbytes={size}\nmd5={local_md5}\n"
+            f"hmac-sha256={local_hmac}\ncontext={HMAC_CONTEXT.decode()}\niters={HMAC_ITERS}\n"
+            "verify: scripts/backup-sensitive --verify --ask-pass\n")
+
+        # upload the archive, then the sidecar
+        for src, dst in ((enc_path, name), (sidecar_path, name + ".hmac")):
+            up = subprocess.run(["rclone", "copyto", str(src), f"{REMOTE_DIR}/{dst}"],
+                                capture_output=True, text=True)
+            if up.returncode != 0:
+                return die(f"rclone copyto {dst} failed: {up.stderr.strip()}")
+
+        # verify: remote md5 must equal local md5
+        rm = subprocess.run(["rclone", "md5sum", f"{REMOTE_DIR}/{name}"],
+                            capture_output=True, text=True)
+        if rm.returncode != 0:
+            return die(f"rclone md5sum failed: {rm.stderr.strip()}")
+        remote_md5 = (rm.stdout.split() or [""])[0].lower()
+        if remote_md5 != local_md5:
+            return die(f"md5 mismatch - local {local_md5} != remote {remote_md5}; upload NOT trusted")
+
+        MARKER.write_text(f"{date.today().isoformat()} {name} md5={local_md5} "
+                          f"hmac={local_hmac} bytes={size} members={members} restore=ok\n")
+        print(f"backup-sensitive: uploaded {name} ({size} bytes, md5 {local_md5}) to {REMOTE_DIR}/ - "
+              f"verified, {len(paths)} protected path(s), {members} members, .backup-marker written")
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

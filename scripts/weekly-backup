@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""weekly-backup - run backup-sensitive on a clock, on a day with no session.
+
+The gap this closes. scripts/backup-sensitive is trustworthy (encrypt-then-MAC, plus a
+decrypt-and-list restore test that gates the marker write), but a trustworthy backup that
+nobody runs is not a backup. Every other channel in this repo (horizon at SessionStart,
+repo-doctor on commit, /weekly) needs Sam to be sitting there. Left to those, the off-site
+archive drifts past horizon's 21-day tripwire and the tripwire only fires when a session
+happens to open, which is the hazard `backup-unproven` in ai/ERRORS.md. This is the only
+thing here that runs without the operator present.
+
+Shape. A launchd user agent (com.northwindlabs.weekly-backup, source of truth in
+scripts/com.northwindlabs.weekly-backup.plist) fires this once a week. The run is gated on
+the marker's own date token rather than on the schedule, which makes it idempotent and safe
+to fire late. Late is the normal case: launchd runs a missed StartCalendarInterval on the
+next wake, so a laptop asleep at the scheduled minute still gets its backup.
+
+The plist is the SOURCE OF TRUTH and is versioned. launchd only ever loads from
+~/Library/LaunchAgents, so the installed copy lives there, but a job that exists only in
+~/Library/LaunchAgents is an unversioned config that dies with the laptop and leaves no
+audit trail. __REPO__ is a placeholder the install command substitutes, which keeps the
+committed file machine-independent.
+
+================================================================================
+INSTALL. Three steps, and STEP 2 IS NOT OPTIONAL.
+================================================================================
+
+1. Register the agent:
+
+     R=$(git rev-parse --show-toplevel)
+     chmod +x "$R/scripts/weekly-backup"
+     mkdir -p "$R/outputs/ops/backup-runs"
+     sed "s|__REPO__|$R|g" "$R/scripts/com.northwindlabs.weekly-backup.plist" \
+       > ~/Library/LaunchAgents/com.northwindlabs.weekly-backup.plist
+     launchctl bootstrap gui/$(id -u) \
+       ~/Library/LaunchAgents/com.northwindlabs.weekly-backup.plist
+
+2. GRANT FULL DISK ACCESS TO /Library/Developer/CommandLineTools/usr/bin/python3
+   (the exact path matters, see below). macOS protects ~/Desktop, ~/Documents,
+   ~/Downloads and iCloud Drive with TCC. If this repo sits in any of them, a launchd
+   agent is not the terminal and inherits none of the terminal's grants, so without this
+   the job dies at exit 2 with "Operation not permitted" before a single line of Python
+   runs. Observed failure shape: the agent could list $HOME and read ~/Library fine, and
+   was refused on the repo directory with errno 1. A background agent gets no permission
+   dialog, it is simply denied. So this has to be granted by hand and it has to be granted
+   first. Grant it even if the repo currently sits somewhere unprotected: it costs nothing
+   and it survives the day someone moves the repo.
+
+     System Settings, Privacy and Security, Full Disk Access, click +,
+     press Cmd Shift G, paste
+       /Library/Developer/CommandLineTools/usr/bin/python3, add it, leave the toggle on.
+
+   The grant target must be the Command Line Tools path above, not /usr/bin/python3.
+   /usr/bin/python3 is a SHIM, not an interpreter. It execs whatever xcode-select points
+   at, typically /Applications/Xcode.app/Contents/Developer/usr/bin/python3, so the process
+   TCC judges is Xcode's binary and a grant on the shim path does not cover it. The launchd
+   log records the exact failure in that case: "Xcode.app/.../python3: can't open file
+   .../scripts/weekly-backup: [Errno 1] Operation not permitted".
+
+   The Command Line Tools path is pinned because it is Apple-signed, concrete rather than a
+   shim, independent of xcode-select and of whether Xcode is installed at all, and still
+   3.9.x, which is why both scripts are kept 3.9-clean. It resolves to
+   .../CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9;
+   the GUI grant follows the symlink for you.
+
+3. Force one real run, WITH SOMEONE AT THE KEYBOARD:
+
+     launchctl kickstart -k gui/$(id -u)/com.northwindlabs.weekly-backup
+     cat "$R/outputs/ops/backup-runs/$(date +%F).log"
+
+   Expect one interactive moment. The first time launchd rather than a terminal runs
+   `security find-generic-password`, macOS may show a keychain dialog. Click Always
+   Allow once. Do it here, not at 06:20 on a Sunday with nobody there to click, or the
+   job hangs until its one hour timeout. If no dialog appears, nothing was needed.
+   The marker is normally fresh, so this run will report a skip. To prove the whole
+   cycle in the launchd context, run the same command after temporarily adding
+   <string>--force</string> to ProgramArguments, then take it out again.
+
+UNINSTALL:
+
+     launchctl bootout gui/$(id -u)/com.northwindlabs.weekly-backup
+     rm ~/Library/LaunchAgents/com.northwindlabs.weekly-backup.plist
+
+================================================================================
+Why the ProgramArguments are what they are
+================================================================================
+
+The job runs a five line Python bootstrap rather than the script directly. Two reasons.
+It keeps the TCC identity on /Library/Developer/CommandLineTools/usr/bin/python3, so the
+grant stays narrow (a /bin/sh -c wrapper would have moved the grant onto /bin/sh, which
+every shell script on the machine would then inherit). And it gives the one failure that
+scripts/weekly-backup cannot report a voice: if the script cannot be read at all, the script
+obviously cannot notify, log, or advance anything, and the run would be silent apart from a
+line in launchd.log that nobody opens. The bootstrap itself touches nothing inside the repo,
+so it always runs, and it turns "could not even start" into a banner. Exit 0 and exit 1 are
+the script's own outcomes and it stays quiet for those; the script handles its own noise.
+
+The bootstrap is column zero on purpose. Indenting it is an IndentationError that
+plutil cannot see.
+
+-I (isolated mode) is load bearing, not decoration. `python3 -c` puts the working
+directory on sys.path, the working directory here is the repo, and if the repo is
+TCC-protected then without -I even `import subprocess` dies with errno 1 before the
+bootstrap can say anything. Observed: without -I the job exited 1 with an import traceback
+and no banner; with -I it reaches the notification. -I also implies -E and -s, which a
+scheduled job wants anyway.
+
+Other choices:
+- /opt/homebrew/bin first in PATH: rclone usually exists only there, and putting it first
+  makes the openssl binary deterministic across interactive and scheduled runs.
+- Sunday 06:20: weekends are off-days (daily-log hard rule 6), so no session is scheduled
+  against it. If the laptop is asleep, launchd runs the missed interval on the next wake
+  and the marker gate still lets it through, so sleep can delay the backup but never
+  skip it.
+- Background plus low priority IO: because launchd defers a missed run to wake, a
+  collision with a working session is always possible, so the run is throttled rather
+  than scheduled around.
+- RunAtLoad false: installing or logging in must not push a full archive to the remote.
+
+Not a digest. A daily-digest job was considered and cut: horizon already runs at every
+SessionStart, and a dated file nobody opens is a second delivery channel for a signal that
+is already delivered. What survives is the backup, which is the half with a hazard behind it.
+
+Usage:
+  scripts/weekly-backup           back up if the marker is BACKUP_EVERY_DAYS+ days old
+  scripts/weekly-backup --force   back up regardless of the marker's age
+  scripts/weekly-backup --quiet   no desktop notification on failure
+  scripts/weekly-backup --help    print this text and exit
+
+NOT ON macOS (Linux, WSL). launchd, the plist, Full Disk Access and the Keychain do not
+apply; the script itself is portable. Give backup-sensitive its passphrase through
+OPERATOR_OS_BACKUP_PASSPHRASE_FILE (see that script's PASSPHRASE STORE paragraph) and
+schedule this with cron instead, Sundays 06:20 local:
+
+     R=$(git rev-parse --show-toplevel)
+     ( crontab -l 2>/dev/null; echo "20 6 * * 0 cd $R && OPERATOR_OS_BACKUP_PASSPHRASE_FILE=$HOME/.config/operator-os/backup-pass python3 scripts/weekly-backup --quiet >> $R/outputs/ops/backup-runs/cron.log 2>&1" ) | crontab -
+
+The failure notification is osascript and is skipped off macOS; the dated log and the
+un-advanced marker remain the channels that cannot be suppressed.
+
+Exit 0 when the backup ran clean, or when it was correctly skipped (marker still fresh, or
+another backup-sensitive run holds the lock). Exit 1 on failure, and failure is loud three
+ways: a desktop notification, a dated log under outputs/ops/backup-runs/, and the marker's
+date token not advancing, which horizon nags on at 21 days.
+
+Read-only on the repo. The only things this writes are its own gitignored log directory and,
+through backup-sensitive, the gitignored .backup-marker and the remote object. It commits
+nothing, sends nothing, spends nothing.
+"""
+import os
+import pwd
+import subprocess
+import sys
+import time
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(HERE),
+                           capture_output=True, text=True).stdout.strip() or str(HERE.parent))
+MARKER = ROOT / ".backup-marker"
+LOG_DIR = ROOT / "outputs" / "ops" / "backup-runs"
+BACKUP_EVERY_DAYS = 7
+BACKUP_TIMEOUT_S = 3600
+KEEP_DAYS = 180
+LOCK_BUSY_RC = 3          # backup-sensitive's "another run holds the lock" exit code
+TIMEOUT_RC = 124
+SPAWN_FAIL_RC = 127
+
+
+def marker_text() -> str:
+    try:
+        return MARKER.read_text(errors="ignore").strip()
+    except OSError:
+        return ""
+
+
+def marker_age(today: date):
+    """Age in days from the marker's own date token, or None if absent or unparseable.
+
+    The date token, not the file mtime: a touched file is not a proven archive. This is the
+    same field horizon reads, so the gate here and the nag there can never disagree.
+    """
+    body = marker_text()
+    if not body:
+        return None
+    try:
+        return (today - date.fromisoformat(body.split()[0])).days
+    except (ValueError, IndexError):
+        return None
+
+
+def notify(title: str, msg: str, quiet: bool) -> None:
+    """Desktop notification. Best effort, never fatal: the log and the un-advanced marker
+    are the channels that cannot be suppressed by a notification permission."""
+    if quiet or sys.platform != "darwin":
+        return
+    safe = msg.replace("\\", "/").replace('"', "'")[:200]
+    head = title.replace("\\", "/").replace('"', "'")[:60]
+    subprocess.run(["osascript", "-e",
+                    'display notification "%s" with title "%s" sound name "Basso"'
+                    % (safe, head)],
+                   capture_output=True)
+
+
+def write_log(today: date, lines) -> Path:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / (today.isoformat() + ".log")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines).rstrip() + "\n\n")
+    return path
+
+
+def prune(today: date) -> None:
+    cutoff = today - timedelta(days=KEEP_DAYS)
+    for p in LOG_DIR.glob("20*-*-*.log"):
+        try:
+            if date.fromisoformat(p.stem) < cutoff:
+                p.unlink()
+        except (ValueError, OSError):
+            continue
+
+
+def main() -> int:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print((__doc__ or "").strip())
+        return 0
+    force = "--force" in sys.argv
+    quiet = "--quiet" in sys.argv
+    if sys.platform != "darwin" and not quiet:
+        print("weekly-backup: launchd and the Keychain are macOS-only; on this platform "
+              "schedule with cron and set OPERATOR_OS_BACKUP_PASSPHRASE_FILE (see --help)",
+              file=sys.stderr)
+    today = date.today()
+    started = datetime.now()
+    age = marker_age(today)
+    try:
+        user = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        user = str(os.geteuid())
+
+    head = ("=== weekly-backup %s  uid=%d user=%s  python=%s  marker=%s"
+            % (started.isoformat(timespec="seconds"), os.geteuid(), user,
+               sys.version.split()[0],
+               "absent" if age is None else "%dd old" % age))
+
+    if age is not None and age < BACKUP_EVERY_DAYS and not force:
+        line = ("skipped: the marker is %dd old, under the %dd cadence. Nothing to do."
+                % (age, BACKUP_EVERY_DAYS))
+        write_log(today, [head, line])
+        prune(today)
+        print("weekly-backup: " + line)
+        return 0
+
+    before = marker_text()
+    t0 = time.time()
+    try:
+        p = subprocess.run([sys.executable, str(ROOT / "scripts" / "backup-sensitive")],
+                           cwd=str(ROOT), capture_output=True, text=True,
+                           timeout=BACKUP_TIMEOUT_S)
+        out, rc = (p.stdout + p.stderr).strip() or "(no output)", p.returncode
+    except subprocess.TimeoutExpired:
+        out, rc = ("TIMED OUT after %ds. No marker was written. The usual cause is a "
+                   "keychain or network prompt with nobody there to answer it."
+                   % BACKUP_TIMEOUT_S), TIMEOUT_RC
+    except OSError as e:
+        out, rc = "could not start backup-sensitive: %s" % e, SPAWN_FAIL_RC
+    mins = (time.time() - t0) / 60.0
+
+    after = marker_text()
+    new_age = marker_age(date.today())
+    advanced = after != before and new_age is not None and new_age <= 1
+
+    if rc == LOCK_BUSY_RC:
+        verdict = ("SKIPPED: another backup-sensitive run holds the lock. Not a failure, "
+                   "and the marker was left alone.")
+        exit_rc = 0
+    elif rc == 0 and advanced:
+        verdict = "OK: backup ran clean in %.1f min and the marker advanced." % mins
+        exit_rc = 0
+    elif rc == 0:
+        verdict = ("FAILED: backup-sensitive exited 0 after %.1f min but the marker did not "
+                   "advance. The off-site copy is NOT newer than it was." % mins)
+        exit_rc = 1
+    else:
+        verdict = ("FAILED: backup-sensitive exited %d after %.1f min. The off-site copy did "
+                   "not advance, and no marker was written." % (rc, mins))
+        exit_rc = 1
+
+    path = write_log(today, [head, verdict, "--- backup-sensitive output ---", out,
+                             "--- .backup-marker now ---", after or "(absent)"])
+    prune(today)
+
+    if exit_rc != 0:
+        notify("Operator OS backup FAILED", verdict.split(": ", 1)[-1], quiet)
+    print("weekly-backup: %s  log: %s" % (verdict, path))
+    return exit_rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

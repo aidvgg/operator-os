@@ -1,0 +1,241 @@
+#!/bin/sh
+# Scans EVERY COMMIT IN THE PUSHED RANGE, not the worktree and not just each ref's tip.
+# This is the half of the enforcement layer that `--no-verify` cannot outlive: pre-commit only
+# ever sees the currently-staged set, so a file committed once with --no-verify is never
+# re-examined by a later commit.
+#
+# Why not scan the worktree (what an earlier version of this hook did): the worktree is a different
+# surface from the push, not a larger one. Commit a secret with --no-verify, then edit or delete
+# the file without staging it, and a worktree scan reads the clean copy on disk while git ships
+# the bad blob to the remote.
+#
+# Why not scan only each ref's tip (the first cut of that rewrite): commit the secret
+# with --no-verify, remove it in the NEXT commit, push both, and the tip is clean while the
+# secret still reaches the remote at the intermediate sha and stays in the history forever.
+# The range is the only honest unit.
+#
+# So: git hands this hook the ref updates on stdin (<local-ref> <local-sha> <remote-ref>
+# <remote-sha>, one per line). For each update we enumerate the commits actually being
+# transferred, dedupe across refs, and materialize each one in a throwaway detached worktree
+# under the system temp directory (`$TMPDIR`, else /tmp) to run repo-doctor there. Deleted refs
+# carry no content and are skipped.
+#
+# HOW THE RANGE IS RESOLVED. When git tells us the remote sha and we
+# hold that object, the range is `rev-list <local> ^<remote>` and costs nothing. When it does
+# not (a brand-new ref, or a sha never fetched), we ASK THE REMOTE with `git ls-remote`.
+# The old fallback guessed from local remote-tracking refs (`rev-list <local> --not --remotes`)
+# and had a silent catastrophic mode: in the ordinary steady state where origin/main already
+# covers your branch, pushing that branch to a DIFFERENT remote, or by URL, excluded every
+# commit, emptied the queue, and exited 0 with NO OUTPUT AT ALL. This has happened: a long run
+# of commits carrying a secret reached a fresh remote with this hook printing nothing.
+#
+# THREE ROOTS. A push-time scan judges one tree using another tree's rules:
+#   scan_root    the materialized commit. Its bytes are the subject.
+#   rules_root   THIS checkout, passed as --live-root. The doctor, .repo-doctor-allow and
+#                .gitignore policy come from here, because an exception must be CURRENT to be
+#                an exception, and because a commit that weakened the doctor otherwise
+#                self-approved forever (reproduced with hooks on and no --no-verify).
+#   machine_root THIS checkout, for checks whose subject is the machine (raw/, PAYMENT-DETAILS,
+#                money-drift, sessionstart-mute), whose inputs are gitignored or mtime-based and
+#                so were absent from a detached worktree, firing as guaranteed false positives.
+#   NOT repointed: ai/TOMBSTONES.md. A commit made before a value was retired was legitimately
+#                clean when made; the ripple obligation belongs to the retiring session.
+#
+# Fail closed everywhere: any git step that does not do what it says (rev-parse, rev-list,
+# ls-remote, worktree add) blocks the push, a range over MAX_COMMITS blocks rather than quietly
+# scanning a subset, and EVERY exit path prints a line. A push that could not be fully scanned
+# is never a push found clean, and a scan of nothing is never silent.
+#
+# Cost, measured on a repo of a few hundred tracked files: roughly 3 seconds per commit scanned,
+# most of it the scan itself and the rest materializing the worktree. It is essentially linear in
+# commits, so the 50-commit cap is worth a couple of minutes worst case and a typical
+# single-commit push stays under 3s. Re-measure on your own repo rather than trusting this line:
+# a stated cost that nobody has timed on the tree in front of them is the shape that drifts.
+#
+# Escaping this takes a second deliberate act (`git push --no-verify`), which is the point:
+# one slip does not silently become permanent.
+set -u
+
+MAX_COMMITS=50
+
+# Hooks inherit GIT_DIR/GIT_INDEX_FILE etc. Left set, every nested git call (and repo-doctor's
+# own `git rev-parse --show-toplevel`) would resolve back to THIS worktree and silently scan
+# the wrong tree while reporting the pushed sha.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX 2>/dev/null || true
+
+ROOT=$(git rev-parse --show-toplevel) || {
+    echo "pre-push BLOCKED: \`git rev-parse --show-toplevel\` failed, cannot scan" >&2
+    exit 1
+}
+
+# $1 is the remote name, or a bare URL when pushing straight to one. Either form is a valid
+# argument to ls-remote, which is why we no longer care whether it names a configured remote.
+REMOTE="${1:-}"
+if [ -z "$REMOTE" ]; then
+    echo "pre-push BLOCKED: git passed no remote argument, so the pushed range cannot be" >&2
+    echo "                  resolved against what the remote already holds." >&2
+    exit 1
+fi
+
+# Throwaway scan base. mktemp, not a fixed path, so two concurrent pushes (or a second clone of
+# this repo) cannot delete each other's live scan worktree mid-run. Portable: `$TMPDIR` when the
+# platform sets one (macOS does), `/tmp` otherwise (Linux); a hardcoded /private/tmp blocked every
+# hooked push from a Linux clone. Fail loud if mktemp cannot deliver.
+SCAN_TMP="${TMPDIR:-/tmp}"
+SCAN_TMP="${SCAN_TMP%/}"
+SCAN_BASE=$(mktemp -d "${SCAN_TMP}/operator-os-prepush.XXXXXXXX") || {
+    echo "pre-push BLOCKED: could not create a scan directory under ${SCAN_TMP}" >&2
+    exit 1
+}
+cleanup() {
+    for _w in "$SCAN_BASE"/*; do
+        [ -d "$_w" ] && git worktree remove --force "$_w" >/dev/null 2>&1
+    done
+    rm -rf "$SCAN_BASE"
+    git worktree prune >/dev/null 2>&1
+}
+# The handlers EXIT. A trap that only cleans up lets the interrupted loop resume and print
+# "clean" for a scan that never finished.
+trap 'cleanup' EXIT
+trap 'echo "pre-push BLOCKED: interrupted, nothing cleared" >&2; cleanup; exit 130' INT
+trap 'echo "pre-push BLOCKED: terminated, nothing cleared" >&2; cleanup; exit 143' TERM
+
+# What does the remote ACTUALLY have? Asked once, lazily, only if some ref update needs it.
+REMOTE_TIPS=""
+REMOTE_ASKED=no
+resolve_remote_tips() {
+    [ "$REMOTE_ASKED" = yes ] && return 0
+    REMOTE_ASKED=yes
+    _ls=$(git ls-remote "$REMOTE" 2>/dev/null) || return 1
+    # Keep only tips whose objects we hold; `^<missing>` aborts rev-list.
+    for _s in $(printf '%s\n' "$_ls" | awk '{print $1}'); do
+        if git cat-file -e "${_s}^{commit}" 2>/dev/null; then
+            REMOTE_TIPS="$REMOTE_TIPS ^$_s"
+        fi
+    done
+    return 0
+}
+
+shas=""
+count=0
+refs=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    refs=$((refs + 1))
+    case "$local_sha" in
+        *[!0]*) ;;         # a real object
+        *) continue ;;     # all zeros: ref deletion, no content to scan
+    esac
+    # A ref pointing at a non-commit still ships its payload. Assuming every local_sha was a
+    # commit let a blob-pointing tag through unscanned.
+    if ! git cat-file -e "${local_sha}^{commit}" 2>/dev/null; then
+        echo "pre-push BLOCKED: ${local_ref:-?} points at $local_sha, which is not a commit," >&2
+        echo "                  so its contents cannot be materialized and scanned." >&2
+        exit 1
+    fi
+    # An all-zero (or absent) remote sha means the remote has no such ref yet, so exclude what
+    # it already has via its other refs. A remote sha we do not hold locally (never fetched)
+    # takes the same path: `^<missing>` would abort rev-list on a legitimate push.
+    have_remote=no
+    case "${remote_sha:-}" in
+        *[!0]*) git cat-file -e "${remote_sha}^{commit}" 2>/dev/null && have_remote=yes ;;
+    esac
+    if [ "$have_remote" = yes ]; then
+        range_out=$(git rev-list "$local_sha" "^$remote_sha")
+        rc=$?
+    else
+        # Ask the remote rather than guessing from local tracking refs.
+        if ! resolve_remote_tips; then
+            echo "pre-push BLOCKED: \`git ls-remote $REMOTE\` failed, so what the remote already" >&2
+            echo "                  holds is unknown and the pushed range cannot be bounded." >&2
+            echo "                  Nothing scanned, nothing cleared to push." >&2
+            exit 1
+        fi
+        range_out=$(git rev-list "$local_sha" $REMOTE_TIPS)
+        rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "pre-push BLOCKED: \`git rev-list\` failed for ${local_ref:-?}, so the pushed range" >&2
+        echo "                  is unknown. Nothing scanned, nothing cleared to push." >&2
+        exit 1
+    fi
+    for sha in $range_out; do
+        case " $shas " in
+            *" $sha "*) continue ;;   # already queued from another ref
+        esac
+        shas="$shas $sha"
+        count=$((count + 1))
+    done
+done
+
+if [ -z "$shas" ]; then
+    # Deletions and already-present refs land here. Announced, never silent: a bare `exit 0`
+    # is exactly how a large unscanned push looked indistinguishable from a clean one.
+    echo "pre-push: 0 commit objects to scan across $refs ref update(s), the remote already" >&2
+    echo "          holds every commit being referenced (or the update is a deletion)" >&2
+    exit 0
+fi
+
+if [ "$count" -gt "$MAX_COMMITS" ]; then
+    echo "pre-push BLOCKED: $count commits in the pushed range, over the $MAX_COMMITS cap." >&2
+    echo "                  Refusing to scan a subset and call the push clean." >&2
+    echo "                  Push in smaller chunks (\`git push <remote> <sha>:<branch>\` a few" >&2
+    echo "                  times), or bypass deliberately with \`git push --no-verify\`." >&2
+    exit 1
+fi
+
+# The doctor that judges every pushed commit is THIS checkout's, never the one carried by the
+# commit under scan. Under the old "a commit is judged by the rules it carries" rule, a commit
+# made while repo-doctor was mid-refactor cleared itself under its own weakened rules and the
+# push printed "clean" (seen more than once, hooks fully on, no --no-verify anywhere in the
+# sequence). Fail closed rather than falling back: the historical
+# copy does not understand --live-root, would silently ignore it, and would restore every
+# defect removed here.
+DOCTOR="$ROOT/scripts/repo-doctor"
+if [ ! -f "$DOCTOR" ]; then
+    echo "pre-push BLOCKED: $DOCTOR is missing from this checkout, so the pushed commits" >&2
+    echo "                  cannot be judged by current rules. Nothing cleared to push." >&2
+    exit 1
+fi
+# New power announces itself: under the flip, an uncommitted edit to the doctor or the allow
+# file governs every commit in the range. Scoped to those paths, never repo-wide, because a
+# working tree routinely carries unrelated dirty files from other work in flight.
+if ! git -C "$ROOT" diff --quiet HEAD -- scripts/repo-doctor .githooks/ 2>/dev/null; then
+    echo "pre-push: NOTE, this checkout has uncommitted changes to the enforcement layer," >&2
+    echo "          and that working-tree copy is what judged every commit below." >&2
+fi
+if ! git -C "$ROOT" diff --quiet HEAD -- .repo-doctor-allow 2>/dev/null; then
+    echo "pre-push: NOTE, .repo-doctor-allow is modified in the working tree, so exemptions" >&2
+    echo "          that are not committed yet were in force for this scan." >&2
+fi
+
+status=0
+scanned=0
+for sha in $shas; do
+    short=$(git rev-parse --short=7 "$sha") || {
+        echo "pre-push BLOCKED: \`git rev-parse --short=7 $sha\` failed, refusing to push unscanned" >&2
+        exit 1
+    }
+    wt="$SCAN_BASE/$short"
+    if ! git worktree add --detach "$wt" "$sha" >/dev/null 2>&1; then
+        echo "pre-push BLOCKED: could not materialize $short at $wt (git worktree add failed)." >&2
+        echo "                  Nothing was scanned, so nothing is cleared to push." >&2
+        exit 1
+    fi
+    out=$(cd "$wt" && python3 "$DOCTOR" --live-root="$ROOT" 2>&1)
+    rc=$?
+    scanned=$((scanned + 1))
+    git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    if [ "$rc" -ne 0 ]; then
+        echo "" >&2
+        echo "pre-push BLOCKED on pushed commit $short ($sha), repo-doctor exit $rc:" >&2
+        echo "$out" | sed 's/^/    /' >&2
+        status=1
+    fi
+done
+
+if [ "$status" -eq 0 ]; then
+    echo "pre-push: repo-doctor clean on $scanned commit(s) in the pushed range" >&2
+fi
+exit $status
