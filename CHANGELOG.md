@@ -13,8 +13,9 @@ the machinery is the same, the way in is new.
 - `GUIDE.md`: the front door for a solo operator who is not technical and runs the OS through an
   AI coding agent. Plain words, one action per step, the real output quoted after each step.
 - `skills/onboard/`: agent-run setup. The operator says "Set up Operator OS for me."; the skill
-  runs the first-run steps, interviews the operator one plain question at a time (name, business,
-  what you sell, who you sell to, how you charge, channels, voice), does the rebrand and the demo
+  runs the first-run steps, interviews the operator one plain question at a time (name, business
+  and billing entity, email, what you sell, who you sell to, how you charge, channels, voice,
+  invoice prefix, currency, timezone, optional tools; "skip" is an allowed answer), does the rebrand and the demo
   wipe, verifies with the scripts, makes the first commit, and ends with a plain summary. Bank and
   wire details are never typed into the chat; the skill names the one local file to fill in by hand.
   Discoverable as `/onboard` in Claude Code and `$onboard` in Codex through the generated adapters.
@@ -27,6 +28,15 @@ the machinery is the same, the way in is new.
 - `SETUP.md` is now the reference: a banner at the top points first-time setup at `GUIDE.md`, and
   section 2 names the `onboard` skill as the supported hand-to-agent path.
 - `package.json` version 2.2.0.
+- After a scripted walk of `GUIDE.md` by a fictional non-technical operator: the onboard skill
+  now names every demo invoice-number string in the invoice skill (the four copies of the demo
+  ledger's next number and the two format strings), runs the tree-wide proof grep at E4 after the wipe and the generator pass
+  instead of right after the sweep, deletes the self-describing "Template note" section in
+  `ai/DECISIONS.md` with the demo rows, and tells the agent to regenerate the adapters and rerun
+  `scripts/money` before the E4 doctor run. `GUIDE.md` day 1 says where the plan lands, day 3 says
+  to add the client before the first proposal, and section 8 says to ignore the checker's
+  "escape hatch" wording. The daily-log skill states the day-file shape, since a wiped repo
+  ships no example.
 
 ## [2.1.0] - 2026-08-19
 

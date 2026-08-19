@@ -76,15 +76,24 @@ Set up Operator OS for me.
 That sentence runs the agent's setup recipe, `skills/onboard/SKILL.md`. You do not need to read
 it. Here is what the agent will do, in plain words:
 
-1. Switch on the safety checks and create the one file that holds your payment details (empty for
-   now). You will see it run `scripts/repo-doctor`, a checker, and report back.
-2. Ask you plain questions, one at a time: your name, your business name, what you sell, who you
-   sell to, how you charge, which channels you use (for example LinkedIn, email), and how you like
-   to sound. Answer in a sentence each. "Skip" is an allowed answer.
+1. Check which tools are installed (git, Python, node, Google Chrome, poppler) and tell you what
+   is missing; only git and Python stop it, the rest can come later. Then switch on the safety
+   checks and create the one file that holds your payment details (empty for now). You will see
+   it run `scripts/repo-doctor`, a checker, and report back.
+2. Ask you about twelve plain questions, one at a time: your name, your business name, the email
+   for your documents, what you sell, who you sell to, how you charge, which channels you use (for
+   example LinkedIn, email), how you like to sound, the letters that start your invoice numbers,
+   your currency, your timezone, and which optional tools you want now. Answer in a sentence each.
+   "Skip" or "I don't know yet" is an allowed answer: the agent writes a short "to fill in later"
+   note in the right file instead of guessing. At the end it reads your answers back and asks
+   "anything to change?" before it touches a file.
 3. Replace the demo business with yours, everywhere the demo name appears, and wipe the demo
    clients, invoices and logs.
 4. Run the checkers again, make the first saved snapshot (a commit, a saved version you can always
-   go back to), and end with a short summary of what it changed and what to do next.
+   go back to), and end with a short summary of what it changed and what to do next. The snapshot
+   is titled "Make Operator OS mine: <your business name>" and stays on your computer; nothing is
+   pushed anywhere during setup. Your folder still points at the template's online address, so
+   pushing comes later (section 7), after you create your own private online copy.
 
 The one thing you do by hand: your bank or wire details. The agent will not ask for them in the
 chat, and you should never type them there. Chat text can end up in logs. Instead the agent will
@@ -94,8 +103,9 @@ tell you to open one file in a text editor and fill it in yourself:
 knowledge/business/invoices/PAYMENT-DETAILS.md
 ```
 
-Say "open the payment details file in TextEdit for me" and it opens. Replace every placeholder in
-angle brackets with your real values, save, close. This file is deliberately excluded from the
+Say "open the payment details file for me" and the agent opens it in your text editor (TextEdit
+on a Mac) without reading it. Replace every placeholder in angle brackets with your real values,
+save, close. This file is deliberately excluded from the
 saved history and from any online copy, and the checker refuses to ever save it. Invoices read it;
 nothing else touches it.
 
@@ -114,16 +124,20 @@ soft  hooks-unwired: run `git config core.hooksPath .githooks` (one-time per clo
 repo-doctor: 2 soft warning(s), no hard violations
 ```
 
-You will also see one line from the deadline clock each time the agent starts, like
-`horizon: 0 overdue, 0 in next 14d, 1 DECISIONS event gate(s); no verified backup recorded yet`.
-Zero overdue is good. The backup part is covered in section 7.
+You will also see one line from the deadline clock each time the agent starts. A fresh clone
+prints `horizon: 0 overdue, 0 in next 14d, 1 DECISIONS event gate(s); no verified backup recorded
+yet`. After setup the demo decision row is gone with the rest of the demo, so the line becomes
+`horizon: 0 overdue, 0 in next 14d; no verified backup recorded yet`. Both are fine; zero overdue
+is the part that matters. The backup part is covered in section 7.
 
 ## 5. Make it yours
 
 The setup questions, and why each one matters:
 
 - **Your name and business name.** They go on every proposal and invoice, and into the agent's
-  standing instructions so it knows who it works for.
+  standing instructions so it knows who it works for. If a company (an LLC, for example) bills
+  your clients, say so; its name goes where the demo's company name was.
+- **Your email.** The one that goes on proposals and invoices.
 - **What you sell and who you sell to.** This is how the agent writes proposals in your words and
   judges whether a prospect fits you.
 - **How you charge** (hourly, per project, retainer, packages) and your usual price range. The
@@ -131,6 +145,11 @@ The setup questions, and why each one matters:
   find in your files.
 - **Which channels you use.** Email, LinkedIn, X, calls. Only those get voice rules.
 - **How you like to sound.** Formal or casual, short or detailed, any words you never use.
+- **Invoice letters and currency.** Two or three letters that start your invoice numbers (they
+  look like `AB-2026-001`) and the currency you bill in.
+- **Your timezone.** The daily log uses it to know what day it is.
+- **Optional tools.** PDFs (needs Google Chrome), the encrypted backup, the LinkedIn and X read
+  tools (paid). Say which you want now; the rest can come later.
 
 The demo business disappears completely: its clients, invoices, logs, research and decisions are
 deleted, and its name is replaced in every file that carried it. What stays is the machinery.
@@ -142,16 +161,18 @@ Nothing is final. Afterwards you can say "change my price range to X", "add a cl
 
 One sentence a day. Each one runs one of the agent's recipes (the folder calls them skills).
 
-- **Day 1: "plan my day."** The agent asks what you intend to do today, writes it to a page for
-  that date under `knowledge/ops/logbook/days/`, and reads back anything overdue. Recipe:
-  daily-log.
+- **Day 1: "plan my day."** The agent asks what you intend to do today, writes your list into
+  the logbook under `knowledge/ops/logbook/` (one row in `LOGBOOK.md`, plus a page for the date
+  under `days/`), and reads back anything overdue. Recipe: daily-log.
 - **Day 2: "log my day."** The agent asks what got done, closes the day, and updates your
   streak and completion numbers in `knowledge/ops/logbook/STATS.md`. Same recipe. Do this every
   evening; plan every morning.
-- **Day 3: "write a proposal for <client>."** The agent asks what the work is and what it costs,
-  checks the price, and produces a branded PDF in `outputs/proposals/`. It also checks its own
-  facts before it shows you the draft. Recipe: proposal-creator. You read the PDF and you send it;
-  the agent never sends anything.
+- **Day 3: "write a proposal for <client>."** If the agent has never heard of that client, say
+  "add a client called <client>" first; it makes the client's folder under `knowledge/clients/`,
+  which is where that client's prices live. Then the agent asks what the work is and what it
+  costs, checks the price against that folder, and produces a branded PDF in
+  `outputs/proposals/`. It also checks its own facts before it shows you the draft. Recipe:
+  proposal-creator. You read the PDF and you send it; the agent never sends anything.
 - **Day 4: "invoice <client> for <work>."** The agent takes the next invoice number from your
   ledger, copies the payment details from the file you filled in, and produces a branded PDF in
   `outputs/invoices/`. That folder stays on your computer only, so keep a copy where you keep
@@ -208,7 +229,8 @@ The five messages you are most likely to see, and what to say.
 - `repo-doctor: 1 HARD violation(s), commit blocked ...`, with a line above it such as
   `HARD  secrets: <file> matches a secret shape near offset ...`, means a file holds something
   that looks like a key or a bank number and the snapshot was refused. That is the guardrail
-  working. Say: "take that value out of the file and keep it local only."
+  working. The same line names an "escape hatch"; ignore it, that is the thing rule 2 in
+  section 7 says no to. Say: "take that value out of the file and keep it local only."
 - `soft  dead-pointer: <file> cites ... which does not exist on disk` means a file still mentions
   a demo file that was deleted. Harmless until fixed. Say: "clear the dead pointers."
 - `money: FAIL - collected mismatch: computed $0 but register states $10,000, refusing to write

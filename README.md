@@ -8,7 +8,9 @@ the day, and refuses to do the few things that must never happen by accident.
 
 **New here? Start with [`GUIDE.md`](GUIDE.md).** It walks you through the first hour in plain
 words. Once the folder is open in your agent, you say one sentence: "Set up Operator OS for me."
-The agent asks you a few questions and does the rest.
+The agent asks you a few questions and does the rest (that sentence runs the `onboard` skill,
+`skills/onboard/SKILL.md`, which takes a fresh clone from the demo to your business in one guided
+session).
 
 [`SETUP.md`](SETUP.md) is the long version: the same setup, with every command spelled out and the
 reasons behind each step. Read it when you want to know why, or when you would rather do a step
@@ -19,8 +21,11 @@ by hand.
 A solo operator who bills clients for work: a consultant, a coach, a freelancer, a one-person
 agency, a small shop. You do not need to be technical. The agent does the technical work
 (the commands, the file edits, the saved snapshots) and tells you what it did in plain words.
-Builders who already use a terminal (the text window where you type commands) get the same
-machinery, plus the reference sections below. Team or multi-operator use is not addressed: one logbook, one memory file, one operator.
+You do not need to be comfortable in a terminal or git to start: `GUIDE.md` assumes neither, and
+the onboarding skill (`skills/onboard/SKILL.md`, `/onboard` in Claude Code, `$onboard` in Codex)
+does the setup for you. Builders who already use a terminal (the text window where you type
+commands) get the same machinery, plus the reference sections below; reading `SETUP.md` end to
+end is for the operator who wants to change the machinery by hand. Team or multi-operator use is not addressed: one logbook, one memory file, one operator.
 
 ## What you get
 

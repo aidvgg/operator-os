@@ -68,7 +68,7 @@ A3. Say this to the person first, in your own words but no longer than this:
 
 > I will set up Operator OS for your business. First I wire the safety checks and create the
 > one private file that will hold your bank details (you fill that in yourself, I never see it).
-> Then I ask you about ten short questions, one at a time. Then I rewrite the demo business into
+> Then I ask you about twelve short questions, one at a time; "skip" is a fine answer. Then I rewrite the demo business into
 > yours, clear the demo data, run the checks, and save the first snapshot. You can stop me at
 > any question.
 
@@ -94,7 +94,10 @@ B3. Tell the person, in plain words: "There is now a file called `PAYMENT-DETAIL
 replace the placeholders with your real bank details whenever you like, today or later. It is
 the only place those numbers live. The folder is set up so that file can never be saved into
 the shared history, and I never read it. Invoices copy the bank block from there." Do not wait
-for them to do it; continue.
+for them to do it; continue. If they ask you to open it for them, now or later, run
+`open knowledge/business/invoices/PAYMENT-DETAILS.md` on macOS (`open -a TextEdit <path>` if they
+name TextEdit) or `xdg-open <path>` on Linux. That launches their editor and shows you nothing;
+it is the only tool call allowed to name that file.
 
 B4. Provider keys, one sentence: "Two optional read tools (they fetch public LinkedIn and X
 pages for prospect research) need paid third-party API keys; if you ever want them, you will
@@ -108,8 +111,10 @@ not the demo.
 ## C. The interview
 
 One question per message. Wait for the answer. Offer the example only as an example, never as a
-default. Record each answer verbatim. After the last question, read the whole list back in one
-short block and ask "anything to change?" before touching a file.
+default. Record each answer verbatim. "Skip", "I don't know yet" or any non-answer is allowed:
+say "fine, I will leave a note to fill in later", record `TODO(onboard): <question>` for that
+field, and move on (hard rule 1). After the last question, read the whole list back in one short
+block and ask "anything to change?" before touching a file.
 
 | # | Question (ask in plain words) | Example answer | What it changes |
 |---|---|---|---|
@@ -174,11 +179,18 @@ entity phrases so the footer does not read "X operating under X": replace
 `<BUSINESS> · <BUSINESS>` -> `<BUSINESS>`, `<BUSINESS> &nbsp;·&nbsp; dba <BUSINESS>` ->
 `<BUSINESS>`, `<BUSINESS> (dba <BUSINESS>)` -> `<BUSINESS>`, `<BUSINESS> · dba <BUSINESS>` ->
 `<BUSINESS>`, `<BUSINESS>, operating under <BUSINESS>` -> `<BUSINESS>`. Also in
-`skills/invoice-creator/SKILL.md`, replace the example invoice number, which is the demo ledger's
-next number `NL-2026-004` (the string E2 later tombstones), with `<PREFIX>-<YEAR>-001` (three places), and the example client name `Acme Retail` with
-`Example Client` where it appears in the sample JSON. Verify with
-`grep -rniE 'northwind|rivera|sam@' skills/proposal-creator skills/invoice-creator`: the only
-hits left are in the two design-standard specimen files, which stay.
+`skills/invoice-creator/SKILL.md`, replace every `NL-2026-004` (the string E2 later tombstones,
+the demo ledger's next number; four places: the "e.g." in the read-the-ledger step, and three in
+the sample JSON) with `<PREFIX>-<YEAR>-001`, and replace the two format strings that name the demo
+prefix, `NL-{YYYY}-{NNN}` and `invoices/NL-YYYY-NNN.md`, with `<PREFIX>-{YYYY}-{NNN}` and
+`invoices/<PREFIX>-YYYY-NNN.md`. In the same file's sample JSON replace the example client
+`Acme Retail` with `Example Client` and its email `ap@acmeretail.example` with
+`ap@example-client.example`; in `skills/proposal-creator/SKILL.md` replace `the Acme Retail proposal` with
+`the Example Client proposal` in both places it appears (the description frontmatter and the
+"When to Use" list; it is only a trigger example).
+Verify with `grep -rniE 'northwind|rivera|sam@' skills/proposal-creator skills/invoice-creator`:
+the only hits left are in the two design-standard specimen files, which stay. Then
+`grep -n "NL-" skills/invoice-creator/SKILL.md` must print nothing.
 
 **D4. The one place the operator's first name is functional.** In `scripts/repo-doctor`, the
 `_ORIGIN_OK` regex (find it with `grep -n "_ORIGIN_OK = " scripts/repo-doctor`) carries two
@@ -241,7 +253,11 @@ for the first name: `Sam Rivera` -> `<FULL_NAME>`; `\bSam\b` -> `<FIRST_NAME>`;
 `Northwind Labs` -> `<BUSINESS>`; `Rivera Holdings LLC` -> `<ENTITY>`;
 `sam@northwindlabs.example` -> `<EMAIL>`; `northwindlabs.example` -> `<DOMAIN>`; then the
 entity-collapse phrases from D3 when `ENTITY` equals `BUSINESS`. Do not touch binaries, fonts or
-PDFs. Afterwards `grep -rnwE 'Sam|Northwind|Rivera' --exclude-dir=node_modules --exclude-dir=.git .`
+PDFs. The proof grep runs at E4, not here, because three kinds of hit are cleared later on
+purpose: `knowledge/memory.md` (replaced whole in E3), the demo proposal files under
+`outputs/proposals/` (deleted in E1) and the generated daily-log views (rewritten by the D8
+`--write`, which picks up the swept generator). At E4,
+`grep -rnwE 'Sam|Northwind|Rivera' --exclude-dir=node_modules --exclude-dir=.git .`
 may hit only: `SETUP.md`, `README.md`, `GUIDE.md`, `CHANGELOG.md`, `skills/onboard/SKILL.md`, the
 two specimen files, and the local `PAYMENT-DETAILS.md` copy (which the sweep never opens).
 Anything else is a miss; fix it.
@@ -287,12 +303,15 @@ E2. Clear the three ledgers in `ai/`, keeping every heading, the column document
 whole `## Hazards` section of `ai/ERRORS.md` (a hazard is a licence: roughly a dozen
 `repo-doctor` checks cite one). In each of `ai/DECISIONS.md`, `ai/ERRORS.md` and
 `ai/TOMBSTONES.md`, delete the demo data rows under the table header and its separator row, and
-nothing else. Then append one real tombstone row to `ai/TOMBSTONES.md`, because the doctor reports
+nothing else, with one exception: `ai/DECISIONS.md` also carries a section headed `## Template
+note, and this one is deliberate`, which explains the demo's third row and ends by saying to
+delete it along with the demo rows; delete that whole section (heading to the line before the
+table header). Then append one real tombstone row to `ai/TOMBSTONES.md`, because the doctor reports
 `tombstones-source` as soft when the table parses to zero rows and because the demo numbering
 genuinely is retired:
 
 ```
-| `NL-2026-004` | <TODAY> | The template's demo invoice numbering, retired by the onboard skill. Live numbering uses the `<PREFIX>-` prefix and the next number lives in `knowledge/business/invoices/INVOICE-LEDGER.md`. Delete this row once a real retired value replaces it and the demo string is gone from the remote. |
+| `NL-2026-004` | <TODAY> | The template's demo invoice numbering, tombstoned by the onboard skill. Live numbering uses the `<PREFIX>-` prefix and the next number lives in `knowledge/business/invoices/INVOICE-LEDGER.md`. Delete this row once a real retired value replaces it and the demo string is gone from the remote. |
 ```
 
 That dead string is the demo ledger's next number, and after D3 it appears nowhere in a curated
@@ -327,7 +346,12 @@ pointer to `outputs/outbound/prospect-gate.md`, the standard offer pointing at
 | `pricing-outcomes.md` | `knowledge/business/pricing-outcomes.md` (empty ledger) |
 | `business-profile.json` | `knowledge/business/operator-business-profile.json` (must parse as JSON; unanswered fields are the string `unknown`) |
 
-E4. Rewrite queue. After E1 to E3, run `scripts/repo-doctor` and clear every remaining
+E4. Rewrite queue. After E1 to E3, first run `scripts/sync-agent-adapters --write` (the D8
+regeneration; the sweep changed the generator, so the generated views are stale until this runs)
+and `scripts/money` (it rewrites `knowledge/business/MONEY.md`, which is now older than the fresh
+register). Without those two, the doctor reports `agent-adapters ... stale` as HARD and
+`money-drift` as soft, and neither is a rewrite-queue item. Then run the D9 proof grep, then
+`scripts/repo-doctor`, and clear every remaining
 `dead-pointer` line by editing the citing file to point at a real path or a `<placeholder>`;
 D10 already covers `knowledge/clients/README.md` and `knowledge/ops/tools-and-stack.md`. A
 `TODO(onboard): ...` line is tolerated by every check; a dangling backticked path is not. Never
@@ -380,6 +404,11 @@ Plain text, short, in this order:
    "invoice <client> for <work>", "weekly review". Add two standing ones: "add a client called
    <name>" the day real work starts, and "what does this mean?" for any warning they do not
    understand. Remind them you draft and they send.
+5. Two later steps, both optional and both from `GUIDE.md` section 7, one line each: "connect
+   this folder to my private GitHub repository and push" once they have made an empty private
+   repository on github.com (you add the remote and push only when they say so, in that later
+   session, never in this one), and "set up the encrypted backup" once rclone and a cloud remote
+   exist (`scripts/backup-sensitive --init` in that session).
 
 ## What this skill does not do
 
@@ -396,7 +425,8 @@ All true, or the run is not done:
 
 - `grep -c "Northwind Labs" CLAUDE.md` prints `0`, and the D9 grep hits only the allowed files.
 - The five F commands print the stated lines.
-- `knowledge/business/invoices/PAYMENT-DETAILS.md` exists and was never opened by a tool call.
+- `knowledge/business/invoices/PAYMENT-DETAILS.md` exists and was never read by a tool call
+  (the B3 `open` that hands it to their editor is the one exception).
 - One commit titled `Make Operator OS mine: <BUSINESS>` is at `HEAD`; `git status --porcelain`
   is empty except gitignored paths; no push happened.
 - Every fact in the rewritten files came from the interview or the tree; every gap is a

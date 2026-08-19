@@ -52,11 +52,13 @@ demo you delete.
 The whole of sections 2 to 4 can be handed to your agent, and that is the supported path: open
 the clone in Claude Code (or Codex) and say "Set up Operator OS for me." The `onboard` skill
 (`skills/onboard/SKILL.md`, reachable as `/onboard` in Claude Code and `$onboard` in Codex) runs
-these sections, asks you for the values only you know (identity, prices, channels, voice), and
-never asks for bank or wire details: it points you at the one local file to fill in yourself.
-`GUIDE.md` is the plain-words walkthrough of that path. The manual path below is the same work
-done by hand, and the reference for what the skill does. If you hand it over, read the summary
-it gives you at the end and look at the diff.
+these sections plus the rebrand in section 3, asks you for the values only you know (identity,
+prices, channels, voice), and never asks for bank or wire details: it tells you to fill
+`knowledge/business/invoices/PAYMENT-DETAILS.md` yourself in a text editor, because wire details
+never go into the chat. It was run end to end on a scratch clone before release, and its step F
+lists the exact lines the five verification commands must print. `GUIDE.md` is the plain-words
+walkthrough of that path. The manual path below is the same work done by hand, and it is what
+the skill follows. Whichever path you take, read the diff before the first commit.
 
 **Requirements before you start:** git, Python 3.9 or newer, and node (both PDF generators are
 JavaScript run by node; `npm install` is only for the legacy `.docx` path). Google Chrome or a
@@ -450,11 +452,18 @@ Then empty the registers, leaving table headers and structure intact:
 - `knowledge/ops/logbook/STATS.md` - zero the rollup.
 - `knowledge/pain-points/pain-point-bank.md` and `.csv` - clear the demo entries, keep the schema.
 - `ai/DECISIONS.md`, `ai/ERRORS.md`, `ai/TOMBSTONES.md` - clear the demo rows, keep the headers and
-  the format documentation. Keep the Hazards section in `ERRORS.md` if the hazards apply to you,
+  the format documentation. In `DECISIONS.md` also drop the section headed "Template note, and
+  this one is deliberate": it explains the demo's third row and asks to be deleted with it. Keep the Hazards section in `ERRORS.md` if the hazards apply to you,
   and read it before deleting any of it: **a hazard is a licence.** Roughly a dozen `repo-doctor`
   checks cite a specific hazard or incident row as their justification, because `CLAUDE.md` says a
   check must trace to one. Delete a hazard bullet and you silently orphan the checks that name it.
   Drop the hazard, or drop the checks it licenses, but not one without the other.
+  One more catch: clearing every row of `ai/TOMBSTONES.md` leaves the table parsing to zero rows,
+  and `repo-doctor` then prints `soft  tombstones-source: ... parsed to ZERO rows` on every run,
+  so the finish line below is not `clean` until the table holds at least one real row. The
+  onboard skill (`skills/onboard/SKILL.md`, step E2) keeps it clean by recording the demo ledger's
+  retired next number as the first tombstone; do the same by hand, or accept that one soft line
+  until your first real retired value.
 
 `knowledge/business/MONEY.md` is not on that list and must not be hand-edited. It is generated, and
 a hand-written figure in it is the exact failure the one-owner rule exists to stop. It is also the
@@ -503,7 +512,8 @@ rewrite queue, and every entry is a real edit: these files describe the demo ope
 so replacing the path alone leaves a sentence about somebody else's clients.
 
 The finish line is exact and reachable: **`repo-doctor: clean`**, with no soft lines at all. Section 2
-done, this section done, the queue worked and `scripts/money` rerun gets you there. That state means
+done, this section done, the queue worked, one real row left in `ai/TOMBSTONES.md` (above) and
+`scripts/money` rerun gets you there. That state means
 the payment-details file exists, the registers parse, the cash rollup was regenerated from your own
 numbers, and nothing points at a file that is gone. Anything still printing after that is about your
 content, not about the demo, and worth reading rather than dismissing.
@@ -647,6 +657,12 @@ Code, `$hard-task` in Codex; any other host reads `skills/hard-task/SKILL.md` an
 
 **harvest** - end-of-session content harvest: 1-3 receipt-backed seeds to `outputs/content/seeds/`.
 Never posts.
+
+**onboard** - the first-run recipe behind "Set up Operator OS for me.": first-run steps, the
+identity interview, rebrand, demo wipe, verification with `scripts/repo-doctor`, `scripts/money`
+and `scripts/horizon`, first commit, plain-English summary. It never asks for bank or wire values
+in the chat. `/onboard` in Claude Code, `$onboard` in Codex; any other host reads
+`skills/onboard/SKILL.md`.
 
 **The vendored craft library** - 17 third-party reference skills for copy, page types, CRO, SEO and
 design-engineering. Reference tier: your doctrine, voice and pricing rules override anything they
