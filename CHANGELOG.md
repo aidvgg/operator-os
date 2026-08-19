@@ -4,6 +4,30 @@ All notable changes to this template are recorded here. The format follows Keep 
 (https://keepachangelog.com/en/1.1.0/); versions follow Semantic Versioning. The version of record
 is the `version` field in `package.json`; `README.md` restates it and this file explains it.
 
+## [2.2.0] - 2026-08-19
+
+The first-hour pass for non-technical operators. No change to the operating contract's doctrine;
+the machinery is the same, the way in is new.
+
+### Added
+- `GUIDE.md`: the front door for a solo operator who is not technical and runs the OS through an
+  AI coding agent. Plain words, one action per step, the real output quoted after each step.
+- `skills/onboard/`: agent-run setup. The operator says "Set up Operator OS for me."; the skill
+  runs the first-run steps, interviews the operator one plain question at a time (name, business,
+  what you sell, who you sell to, how you charge, channels, voice), does the rebrand and the demo
+  wipe, verifies with the scripts, makes the first commit, and ends with a plain summary. Bank and
+  wire details are never typed into the chat; the skill names the one local file to fill in by hand.
+  Discoverable as `/onboard` in Claude Code and `$onboard` in Codex through the generated adapters.
+
+### Changed
+- `README.md` first screen rewritten for the reader: what it is in plain words, who it is for
+  (now including non-technical operators, with the agent doing the technical work), `GUIDE.md`
+  as the first pointer, `SETUP.md` as the long version, what you get in five bullets. The builder
+  sections below keep their facts and open with a readable sentence.
+- `SETUP.md` is now the reference: a banner at the top points first-time setup at `GUIDE.md`, and
+  section 2 names the `onboard` skill as the supported hand-to-agent path.
+- `package.json` version 2.2.0.
+
 ## [2.1.0] - 2026-08-19
 
 Public-release hardening pass. No change to the operating contract's doctrine; every item is a

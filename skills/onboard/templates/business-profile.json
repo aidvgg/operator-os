@@ -1,0 +1,156 @@
+{
+  "_status": {
+    "state": "FIRST PASS from the onboard interview on {{TODAY}}. Every field not answered in that interview is the literal string \"unknown\", which means unasked or unanswered, never a guess.",
+    "what_this_is": "Machine-readable mirror of the business's curated knowledge. The prose files own the facts; this file points at them and never restates a price.",
+    "how_to_update": "Run skills/business-profile-creator (read-and-merge). Never blank-slate rebuild this file by hand.",
+    "authorities_this_file_mirrors": {
+      "positioning_icp_proof": "knowledge/business/brand_foundation.md",
+      "productized_offer_and_price": "knowledge/business/outbound-offer.md",
+      "client_engagement_prices": "knowledge/clients/<client>/roadmap.md",
+      "cash_burn_and_concentration": "knowledge/business/MONEY.md (generated from knowledge/business/invoices/SUMMARY.md)",
+      "voice_rules": "knowledge/voice/copy-rules.md and knowledge/voice/channel-voice.md",
+      "settled_rulings": "ai/DECISIONS.md",
+      "retired_numbers": "ai/TOMBSTONES.md"
+    },
+    "no_prices_rule": "No price appears in this file. Pricing fields name the authority file instead."
+  },
+  "schema_version": "1.0",
+  "last_updated": "{{TODAY}}",
+  "previous_version_note": "Created by the onboard skill from the operator's interview answers. Supersedes the template's demo profile.",
+  "business_profile": {
+    "company_overview": {
+      "name": "{{BUSINESS}}",
+      "legal_entity": "{{ENTITY}}",
+      "entity_phrasing_on_documents": "{{ENTITY_PHRASING}}",
+      "operator": "{{FULL_NAME}}",
+      "contact_email": "{{EMAIL}}",
+      "domain": "unknown",
+      "location": "unknown",
+      "billing_currency": "{{CURRENCY}}",
+      "one_sentence": "{{WHAT_YOU_SELL}}",
+      "mission": "unknown",
+      "vision": "unknown"
+    },
+    "current_state": {
+      "as_of": "{{TODAY}}",
+      "honest_summary": "Operator OS set up on {{TODAY}}. No clients, invoices or logbook days recorded in this repo yet.",
+      "primary_constraint": "unknown",
+      "revenue_shape": "see knowledge/business/MONEY.md",
+      "concentration_risk": "see knowledge/business/MONEY.md",
+      "next_decision_point": "unknown"
+    },
+    "value_proposition": {
+      "primary_value": "{{WHAT_YOU_SELL}}",
+      "unique_mechanism": "unknown",
+      "key_differentiators": [],
+      "core_philosophy": "unknown",
+      "positioning_guardrail": "unknown"
+    },
+    "offerings": {
+      "active_services": [
+        {
+          "name": "Standard offer",
+          "status": "active",
+          "description": "{{WHAT_YOU_SELL}}",
+          "typical_shape": "{{HOW_YOU_CHARGE}}",
+          "pricing": "see knowledge/business/outbound-offer.md"
+        }
+      ],
+      "explicitly_not_offered": [],
+      "free_resources": []
+    },
+    "positioning": {
+      "market_position": "unknown",
+      "category": "unknown",
+      "declared_niche": "{{WHO_YOU_SELL_TO}}",
+      "niche_status": "declared in the onboard interview, not yet tested",
+      "ideal_client_profile": {
+        "size": "unknown",
+        "shape": "{{WHO_YOU_SELL_TO}}",
+        "trigger": "unknown",
+        "buying_signal": "unknown",
+        "decision_maker": "unknown",
+        "technical_precondition": "unknown",
+        "hard_disqualifiers": [],
+        "never_a_disqualifier": []
+      }
+    },
+    "go_to_market": {
+      "model": "unknown",
+      "channels": {{CHANNELS_JSON}},
+      "funnel": "unknown",
+      "current_constraint": "unknown",
+      "operating_constraints": [],
+      "retired_tactics": [],
+      "pricing_strategy": {
+        "currency": "{{CURRENCY}}",
+        "structure": "{{HOW_YOU_CHARGE}}",
+        "authority": "knowledge/business/outbound-offer.md for the standard offer, knowledge/clients/<client>/roadmap.md per engagement",
+        "standing_bias": "flag underpricing rather than going along with it",
+        "raise_rule": "unknown"
+      }
+    },
+    "proof_assets": {
+      "delivered": [],
+      "cannot_claim_yet": [],
+      "testimonials": {
+        "status": "none recorded",
+        "note": "unknown"
+      }
+    },
+    "competitive_positioning": {
+      "vs_alternatives": "unknown",
+      "market_scan": "none yet"
+    },
+    "success_metrics": {
+      "tracked_inputs": [
+        "daily plan-vs-done and focus hours in knowledge/ops/logbook/",
+        "cash collected and outstanding in knowledge/business/MONEY.md"
+      ],
+      "deliberately_not_tracked": [],
+      "composition_target": "unknown",
+      "rollup": "knowledge/ops/logbook/STATS.md"
+    },
+    "brand_voice_summary": {
+      "personality": "{{VOICE_SUMMARY}}",
+      "tone": "{{VOICE_SUMMARY}}",
+      "hard_rules": [
+        "no em dashes anywhere",
+        "never justify actions or price before being asked",
+        "no timelines the operator has not personally verified"
+      ],
+      "full_rules": "knowledge/voice/copy-rules.md",
+      "platform_specific": "knowledge/voice/channel-voice.md"
+    },
+    "content_pillars": {
+      "primary_topics": [],
+      "rule": "every post leads with a mechanism, a number or a step, never diagnosis alone",
+      "seat": "unknown"
+    },
+    "platforms": {{PLATFORMS_JSON}},
+    "operational_infrastructure": {
+      "system_of_record": "this repository",
+      "banking": "wire details live only in the gitignored knowledge/business/invoices/PAYMENT-DETAILS.md",
+      "invoicing": "skills/invoice-creator, numbers from knowledge/business/invoices/INVOICE-LEDGER.md",
+      "proposals": "skills/proposal-creator",
+      "tooling_and_costs": "knowledge/ops/tools-and-stack.md",
+      "backup": "scripts/backup-sensitive"
+    },
+    "_internal_notes_for_agents": {
+      "read_order": [
+        "CLAUDE.md",
+        "knowledge/memory.md",
+        "the topic file for the task",
+        "ai/DECISIONS.md before any decision-shaped move"
+      ],
+      "active_guardrails": [
+        "scripts/repo-doctor on every commit and push",
+        "scripts/horizon for dated commitments",
+        "scripts/money refuses to write a rollup that disagrees with the register"
+      ],
+      "known_gaps": [
+        "every field marked unknown above"
+      ]
+    }
+  }
+}

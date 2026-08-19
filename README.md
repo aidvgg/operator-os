@@ -1,30 +1,50 @@
 # Operator OS
 
-A solo-operator business OS: a git repo that **is** the business. Clients, decisions, pricing,
-invoices, daily logs, brand voice, research, all as plain markdown and JSON under version control.
-Nothing lives only in your head or in a SaaS you cannot grep.
+Operator OS is a folder that holds your whole business: your clients, your prices, your
+decisions, your invoices, your daily log, your brand voice. Everything is a plain text file you
+can open, read and search. An AI coding agent (Claude Code, Codex, or a similar tool) reads the
+rules in this folder and does the work with you: it writes the proposal, issues the invoice, logs
+the day, and refuses to do the few things that must never happen by accident.
 
-An AI coding agent runs on top of it. `CLAUDE.md` is the operating contract it reads first, every
-session: a precedence order so conflicting facts resolve deterministically, a task-to-context-to-output
-routing table, and guardrails that fail loud.
+**New here? Start with [`GUIDE.md`](GUIDE.md).** It walks you through the first hour in plain
+words. Once the folder is open in your agent, you say one sentence: "Set up Operator OS for me."
+The agent asks you a few questions and does the rest.
 
-This template ships the machinery plus a **fictional worked example** (Sam Rivera / Northwind Labs)
-so every script, skill and guardrail can be run end to end on a fresh clone. The demo is deletable
-scaffolding. The machinery is the point.
-
-**Start with [`SETUP.md`](SETUP.md).** It covers first-run setup, the rebrand checklist, and how to
-clear the demo data.
-
-**Version:** 2.1.0. Changes per release: [`CHANGELOG.md`](CHANGELOG.md). The default branch is `main`.
+[`SETUP.md`](SETUP.md) is the long version: the same setup, with every command spelled out and the
+reasons behind each step. Read it when you want to know why, or when you would rather do a step
+by hand.
 
 ## Who this is for
 
-A solo operator, services or consulting shaped by default (the money model, prospect gate,
-proposal and invoice skills assume you bill clients for work), who already runs an AI coding agent
-and is comfortable in a terminal and git. Team or multi-operator use is not addressed: one logbook
-cursor, one memory file, one operator.
+A solo operator who bills clients for work: a consultant, a coach, a freelancer, a one-person
+agency, a small shop. You do not need to be technical. The agent does the technical work
+(the commands, the file edits, the saved snapshots) and tells you what it did in plain words.
+Builders who already use a terminal (the text window where you type commands) get the same
+machinery, plus the reference sections below. Team or multi-operator use is not addressed: one logbook, one memory file, one operator.
+
+## What you get
+
+- One place for the truth about your business, in files you own and can read without any app.
+- A branded proposal and a branded invoice you can generate as a PDF, with the invoice number
+  taken from a register so it is never guessed.
+- A daily log with a plan in the morning and a close at night, and a weekly review.
+- A clock that surfaces anything with a deadline before it is late.
+- Guardrails that stop bank details and keys from ever landing in a saved snapshot, and stop the
+  agent from running the few commands that destroy history.
+
+The template ships with a **fictional worked example** (Sam Rivera / Northwind Labs) so every
+part of it can be run end to end on day one. The setup clears that demo and puts your
+business in its place.
+
+**Version:** 2.2.0. Changes per release: [`CHANGELOG.md`](CHANGELOG.md). The default branch is `main`.
+
+---
+
+The rest of this page is the reference for builders and the curious. You can skip it on day one.
 
 ## The shape
+
+How the folder is laid out. Each row is one top-level folder and the one job it has.
 
 | Directory | What it is |
 |---|---|
@@ -41,7 +61,8 @@ cursor, one memory file, one operator.
 
 ## The guardrails
 
-Small scripts, each doing one job, all of them failing loud rather than passing silently.
+The checks that keep mistakes from reaching a client or a saved snapshot. Each is a small script
+with one job, and each complains out loud rather than passing quietly.
 
 - `scripts/repo-doctor` blocks secrets, protected-path writes, fake office files, expired pages,
   resurrected dead values, and stale generated views. Its secrets scanner is shape-based: it
@@ -72,7 +93,7 @@ replace reading what your agent is about to run.
 
 ## Hosts
 
-Claude Code is first-class: `CLAUDE.md` is read directly, and the `.claude/` layer wires the
+Which AI coding agents this works with, and how each one finds the rules. Claude Code is first-class: `CLAUDE.md` is read directly, and the `.claude/` layer wires the
 guards, the subagents (`fact-check`, `price-attack`, `client-sim`), the commands and the workflows.
 Codex runs the same contract through `.codex/` (config, hook wiring for the same guard scripts,
 agent mirrors) plus `$skill` adapters generated under `.agents/skills/`. Codex gates that layer
@@ -88,6 +109,9 @@ hand-edited, and `repo-doctor` blocks the commit if one drifts. Discovery is sep
 ownership: a skill is owned by `skills/<name>/SKILL.md`, and the per-host adapters only point there.
 
 ## Requirements
+
+What has to be installed on your computer. If you are following `GUIDE.md`, your agent checks
+these for you and tells you what is missing.
 
 - **git**, and **Python 3.9 or newer**. Every script parses and runs on macOS's system `python3`
   (3.9.6); the floor is stated as a version so the claim is testable.
@@ -109,18 +133,20 @@ notes each. Native Windows is untested; use WSL.
 
 ## Running cost
 
-The template is free software. Running it is not: you need an AI coding agent (a Claude Code
+What this costs to run. The template is free software. Running it is not: you need an AI coding agent (a Claude Code
 subscription or an API budget), and, only if you use them, paid third-party provider keys for the
 LinkedIn and X fetch scripts (`scripts/li-fetch`, `scripts/x-fetch`), and an rclone-reachable cloud
 remote for the backup. Nothing else phones home.
 
 ## Support
 
-GitHub issues. Bug reports and questions have templates under `.github/ISSUE_TEMPLATE/`. Before
+Where to ask for help or report a problem: GitHub issues. Bug reports and questions have templates under `.github/ISSUE_TEMPLATE/`. Before
 opening a pull request read [`CONTRIBUTING.md`](CONTRIBUTING.md). Security-relevant reports:
 [`SECURITY.md`](SECURITY.md).
 
 ## Licence
+
+What you are allowed to do with this code and these files.
 
 - First-party code and prose: MIT, see [`LICENSE`](LICENSE).
 - The three redistributed font families: SIL Open Font License 1.1, text in

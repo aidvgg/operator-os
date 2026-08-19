@@ -1,5 +1,11 @@
 # SETUP - make this your business OS
 
+> **This is the reference, the long version.** If you are setting up for the first time, start
+> with [`GUIDE.md`](GUIDE.md) instead. Open the folder in your AI coding agent and say
+> "Set up Operator OS for me." The agent runs sections 2 to 4 of this file for you (the `onboard`
+> skill, `skills/onboard/SKILL.md`), asks you the questions only you can answer, and tells you
+> what it changed. Come back here when you want the why behind a step, or want to do one by hand.
+
 This repo is a solo-operator "business OS": a git repo that IS your business. It ships with a
 fictional worked example (Sam Rivera / Northwind Labs) so you can see every part working end to end.
 This guide turns the demo into your real operation.
@@ -43,10 +49,14 @@ demo you delete.
 
 ## 2. First-run setup
 
-The whole of sections 2 to 4 can be handed to your agent: open the clone in Claude Code and ask it
-to run SETUP sections 2 to 4. It reads this file, runs the commands, and asks you for the values only
-you know (identity, prices, wire details, which the agent never sees). That path has not been tested
-end to end; the manual path below has. If you hand it over, watch the diff.
+The whole of sections 2 to 4 can be handed to your agent, and that is the supported path: open
+the clone in Claude Code (or Codex) and say "Set up Operator OS for me." The `onboard` skill
+(`skills/onboard/SKILL.md`, reachable as `/onboard` in Claude Code and `$onboard` in Codex) runs
+these sections, asks you for the values only you know (identity, prices, channels, voice), and
+never asks for bank or wire details: it points you at the one local file to fill in yourself.
+`GUIDE.md` is the plain-words walkthrough of that path. The manual path below is the same work
+done by hand, and the reference for what the skill does. If you hand it over, read the summary
+it gives you at the end and look at the diff.
 
 **Requirements before you start:** git, Python 3.9 or newer, and node (both PDF generators are
 JavaScript run by node; `npm install` is only for the legacy `.docx` path). Google Chrome or a

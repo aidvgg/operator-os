@@ -4,7 +4,7 @@ One folder per skill, each with a `SKILL.md` (the instructions) plus any `script
 
 `CLAUDE.md` ("Skills" section) is the authoritative inventory: invocation rules, write licences, verification gates, local-run notes. This file lists what exists and points there for policy, so the two cannot drift into a fight. Provider discovery wrappers (`AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, the generated skill views) come from `ai/AGENT_ROUTES.json`; they point here and never own workflow policy.
 
-## First-party (8)
+## First-party (9)
 
 Written for this operation. These are the ones that carry write licences and verification gates, all defined in `CLAUDE.md`.
 
@@ -16,6 +16,7 @@ Written for this operation. These are the ones that carry write licences and ver
 - `research-doctrine` - phase-separated, source-tiered, adversarially audited research for decision-grade work. Its `OPERATOR-INTERNAL.md` binds the generic doctrine to this repo's paths; read it alongside `SKILL.md` when running it here.
 - `hard-task` - the Tier-2 protocol for high-stakes work no skill covers; `/hard-task` in Claude Code, `$hard-task` in Codex, read directly on any other host.
 - `harvest` - end-of-session content harvest: 1-3 receipt-backed seeds to `outputs/content/seeds/`. Never posts.
+- `onboard` - takes a fresh clone from the shipped demo to one person's business: first-run steps, a plain-language interview one question at a time, the rebrand, the demo wipe, verification with the repo's own scripts, and the first commit. `/onboard` in Claude Code, `$onboard` in Codex, or just say "Set up Operator OS for me". Never reads the payment or key files, never pushes. Its replacement files for the registers and the core live in `skills/onboard/templates/`.
 
 ## Vendored reference library (17)
 

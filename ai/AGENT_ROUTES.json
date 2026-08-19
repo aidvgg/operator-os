@@ -338,6 +338,20 @@
         "trigger": "David Ogilvy's advertising principles for copy that sells: positioning, headlines, promises, brand voice, long-form copy, visual logic."
       },
       {
+        "path": ".agents/skills/onboard/SKILL.md",
+        "skill": "onboard",
+        "canonical_skill": "skills/onboard/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Set up Operator OS for a new operator: first-run steps, plain-language interview, rebrand, demo wipe, verification, first snapshot. Trigger on set up Operator OS for me, make this mine, onboard me, first run after cloning."
+      },
+      {
+        "path": ".claude/skills/onboard/SKILL.md",
+        "skill": "onboard",
+        "canonical_skill": "skills/onboard/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Set up Operator OS for a new operator: first-run steps, plain-language interview, rebrand, demo wipe, verification, first snapshot. Trigger on set up Operator OS for me, make this mine, onboard me, first run after cloning."
+      },
+      {
         "path": ".agents/skills/operational-enterprise-ai/SKILL.md",
         "skill": "operational-enterprise-ai",
         "canonical_skill": "skills/operational-enterprise-ai/SKILL.md",
