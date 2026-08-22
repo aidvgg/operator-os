@@ -211,14 +211,17 @@ mechanism is specified.
 
 ## 9. Guardrail fixtures: tests that the checks still fire
 
-**PLANNED.** This section is the specification. It is the owner of the fixture contract, and
-`CLAUDE.md`, `scripts/repo-doctor`, `scripts/horizon` and `scripts/clock_grammar.py` all point here.
+**PARTLY BUILT.** This section is the specification and owner of the fixture contract.
+`scripts/test-git-guard` is the first standing member: 196 assertions across both PreToolUse guards
+and both host wiring files. The repo-doctor manifest and the section 4 quality-command integration
+remain planned.
 
 ### 9.1 Why this exists
 
-The enforcement layer currently has zero tests. A rotted regex, a renamed path, a check that quietly
-returns before its loop, or a rename that leaves a scan pointed at a directory that no longer exists:
-any of these makes a check stop firing while every run stays green.
+The two PreToolUse guards now have a fixture runner. The wider enforcement layer does not yet. A
+rotted regex, a renamed path, a check that quietly returns before its loop, or a rename that leaves a
+scan pointed at a directory that no longer exists can still make an unrepresented check stop firing
+while every run stays green.
 
 **A guardrail that silently stops firing is worse than no guardrail.** No guardrail leaves you
 careful. A dead guardrail leaves you confident, and confidence is what makes people skip the manual
@@ -308,7 +311,8 @@ speak.
 
 ### 9.5 Running it, and keeping it honest
 
-- The runner lives inside the section 4 quality command. Pre-push and pre-send, never pre-commit.
+- `scripts/test-git-guard` runs manually today. The complete runner belongs inside the section 4
+  quality command: pre-push and pre-send, never pre-commit.
 - **Success test:** deliberately break one guardrail, by renaming a path it watches or loosening one
   regex, and the next full run goes red and names that check. If it stays green, the suite is
   decoration.
@@ -348,7 +352,7 @@ edges around money, commitments, client deliverables and recovery. Not a bigger 
 | 6. Golden benchmark | PLANNED |
 | 7. Recovery prerequisites | BUILT |
 | 8. Ratchet rule | LIVE |
-| 9. Guardrail fixtures | PLANNED, specified above |
+| 9. Guardrail fixtures | PARTLY BUILT, hook suite live, repo-doctor manifest planned |
 
 Order of work: sections 4 and 9 together, because the runner needs a home. Then 6, which is the only
 item that measures whether any of this improved the output rather than the plumbing. Section 5's

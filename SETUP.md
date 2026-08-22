@@ -539,12 +539,13 @@ Small scripts, each doing one job. They are the OS's reflexes.
 | `scripts/backup-sensitive` | on demand, weekly via launchd (macOS) or cron (Linux) | Encrypted archive of the gitignored local-only files. Passphrase lives only in your Keychain, or on Linux in the 0600 file named by `OPERATOR_OS_BACKUP_PASSPHRASE_FILE`. |
 | `scripts/pdf-check` / `scripts/docx-check` | inside the document skills | Proves a generated file is really that format, not renamed text, before you send it. |
 | `scripts/sync-agent-adapters` | after routing or contract changes | Regenerates the cross-model adapter views from one owner. |
-| `.claude/hooks/deny-env-access.py` | every file-touching tool call (Read, Edit, Write, NotebookEdit, Grep, Glob, Bash) | Blocks any AI tool call that references a `.env` file. Keys are loaded by the wrapper scripts inside their own process. |
-| `.claude/hooks/deny-destructive-git.py` | every Bash tool call | Denies no-verify commits and pushes, sweep staging (`add -A`, bare-dot adds, `commit -a`), hard resets, forced cleans, worktree-discarding checkout, restore and switch forms, branch force-deletes and forced or deleting pushes. Plain push stays open because the commit protocol requires it. `scripts/test-git-guard` is the fixture suite that proves both PreToolUse guards still fire; run it after any edit to either. Both are wired identically for Codex in `.codex/hooks.json`, and Codex hook trust must be armed interactively before they run there. |
+| `.claude/hooks/deny-env-access.py` | every tool call | Scans target fields, scoped selectors, lists, maps, bounded shell forms and patch target headers for a protected env-file target. Known prose and code fields stay writable; malformed envelopes fail closed. Keys are loaded by the wrapper scripts inside their own process. |
+| `.claude/hooks/deny-destructive-git.py` | every Bash tool call | Denies no-verify commits and pushes, sweep staging (`add -A`, bare-dot adds, `commit -a`), hard resets, forced cleans, worktree-discarding checkout, restore and switch forms, branch force-deletes and forced or deleting pushes. Plain push stays open because the commit protocol requires it. `scripts/test-git-guard` carries 196 assertions proving both guards and both host wiring files; run it after any edit to a guard or hook file. Both guards are wired for Codex in `.codex/hooks.json`, and Codex hook trust must be armed interactively before they run there. |
 
-Both PreToolUse guards match the text of a tool call. That is a floor, not a fence: a spelling that
-never writes the matched token passes, so use filesystem-level permissions where your host offers
-them and read what the agent is about to run.
+The env guard reads a tool-call envelope. That is a floor, not a fence: nested interpreters and
+external state can synthesize a protected path without placing a detectable spelling or resolving
+selector in the envelope, so use filesystem-level permissions where your host offers them and read
+what the agent is about to run.
 
 The design principle across all of them: **fail loud, never silently pass.** A guardrail that is not
 sure stops you. A scan that could not complete is not a scan that came back clean.

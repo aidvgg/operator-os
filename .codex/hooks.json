@@ -24,7 +24,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch|Edit|Write",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",

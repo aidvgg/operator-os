@@ -53,8 +53,10 @@ near-miss behind it does not belong in this section.
   source-shape test there is; and the allow file expires its own entries, so an exception cannot
   outlive the thing it excused. The real control is the **guardrail-fixture suite** specified in
   `knowledge/ops/os-roadmap.md`: known-bad fixtures plus a runner that asserts each check still
-  flags its own fixture. Until that exists, every check here is trusted rather than tested, and the
-  ratchet rule in `CLAUDE.md` is what keeps the gap from growing.
+  flags its own fixture. Its first standing member, `scripts/test-git-guard`, now carries 196
+  assertions across both PreToolUse guards and both host wiring files. Until the repo-doctor
+  manifest exists, the remaining checks are still trusted rather than tested, and the ratchet rule
+  in `CLAUDE.md` is what keeps the gap from growing.
   The shape has a second face worth naming, because it is not a check at all. `ai/AGENT_ROUTES.json`
   is the one registry that generates `AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md` and
   the thin Claude commands. A generated view that drifts from its registry leaves every check green

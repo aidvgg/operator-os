@@ -87,14 +87,15 @@ with one job, and each complains out loud rather than passing quietly.
   adapters from one routing registry, so Claude Code, Codex, Gemini CLI and GitHub Copilot get the
   same instructions from a single owner.
 - `.claude/hooks/deny-env-access.py` and `.claude/hooks/deny-destructive-git.py` are PreToolUse
-  guards: the first denies any agent tool call that references the gitignored key files, the second
-  denies no-verify commits and pushes, sweep staging, hard resets, forced cleans and forced or
-  deleting pushes. `scripts/test-git-guard` is the fixture suite that proves both still fire.
+  guards: the first scans target fields, selectors and bounded shell forms for the gitignored key
+  files, while the second denies no-verify commits and pushes, sweep staging, hard resets, forced
+  cleans and forced or deleting pushes. `scripts/test-git-guard` carries 196 assertions proving both
+  guards and both host wiring files.
 
-Command-string guards are a floor, not a fence. A guard that matches the text of a command can be
-spelled around by a command that never writes the matched token. They stop the accidental and the
-lazy; they do not replace filesystem-level permissions where a host offers them, and they do not
-replace reading what your agent is about to run.
+Tool-call guards are a floor, not a fence. A nested interpreter can synthesize a path without
+placing a detectable spelling or resolving selector in the envelope. The guards stop the accidental
+and the bounded direct forms they recognize; they do not replace filesystem-level permissions where
+a host offers them, and they do not replace reading what your agent is about to run.
 
 ## Hosts
 

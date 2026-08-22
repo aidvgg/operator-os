@@ -4,6 +4,18 @@ All notable changes to this template are recorded here. The format follows Keep 
 (https://keepachangelog.com/en/1.1.0/); versions follow Semantic Versioning. The version of record
 is the `version` field in `package.json`; `README.md` restates it and this file explains it.
 
+## [Unreleased]
+
+### Security
+
+- Hardened `.claude/hooks/deny-env-access.py` across target fields, scoped glob selectors, maps,
+  lists, bounded shell reconstruction and patch target headers. Malformed envelopes now fail closed,
+  while known prose and code fields remain writable.
+- Both Claude Code and Codex now route every tool name through the env guard. Existing Codex clones
+  must re-arm hook trust interactively because `.codex/hooks.json` changed.
+- Expanded `scripts/test-git-guard` from 132 to 196 assertions, including both host wiring files,
+  malformed envelopes and near-miss false-positive controls.
+
 ## [2.2.0] - 2026-08-19
 
 The first-hour pass for non-technical operators. No change to the operating contract's doctrine;
