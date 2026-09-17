@@ -16,7 +16,8 @@ Before you open a pull request:
 4. Keep one owner per state fact. A number, path or rule lives in one file; other files point at
    it. A second copy is a stale line waiting to happen and the review will ask you to remove it.
 5. No em dashes anywhere in what you write, including commit messages. Comma, period, or a single
-   hyphen.
+   hyphen. Vendored third-party skill files (see `skills/VENDORED.md`) are kept verbatim and are
+   exempt from this rule.
 6. A new check must trace to a real failure: an `ai/ERRORS.md` row or a hazard named there. No
    speculative process.
 
