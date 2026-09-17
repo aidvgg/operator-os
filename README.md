@@ -1,5 +1,7 @@
 # Operator OS
 
+[![CI](https://github.com/aidvgg/operator-os/actions/workflows/ci.yml/badge.svg)](https://github.com/aidvgg/operator-os/actions/workflows/ci.yml)
+
 Operator OS is a folder that holds your whole business: your clients, your prices, your
 decisions, your invoices, your daily log, your brand voice. Everything is a plain text file you
 can open, read and search. An AI coding agent (Claude Code, Codex, or a similar tool) reads the
