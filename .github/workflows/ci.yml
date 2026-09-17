@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run git guard fixtures
+        run: ./scripts/test-git-guard
+
+      - name: Run repo-doctor
+        run: ./scripts/repo-doctor
+
+      - name: Check generated agent adapters are current
+        run: ./scripts/sync-agent-adapters --check
+
+      - name: Compile extensionless Python scripts
+        run: |
+          find scripts -maxdepth 1 -type f ! -name "*.*" -print0 \
+            | xargs -0 -I{} sh -c 'file "{}" | grep -qi python && python3 -m py_compile "{}"'
+          find .claude/hooks -maxdepth 1 -type f -name "*.py" -print0 \
+            | xargs -0 python3 -m py_compile
+
+      - name: Check skill scripts with node
+        run: |
+          find skills -path "*/scripts/*.js" -print0 \
+            | xargs -0 -I{} node --check "{}"
