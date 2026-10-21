@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Keep the tombstone prefilter from hiding a regex finding."""
+import importlib.machinery
+import importlib.util
+import io
+import re
+import unittest
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+
+doctor_path = Path(__file__).with_name("repo-doctor")
+loader = importlib.machinery.SourceFileLoader("repo_doctor_prefilter_test", str(doctor_path))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+doctor = importlib.util.module_from_spec(spec)
+loader.exec_module(doctor)
+
+
+def old_hits(text, rows, allows=(), path="knowledge/example.md"):
+    found = []
+    spans = doctor.struck_spans(text)
+    for value, rx in rows:
+        if doctor.allowed("tombstones", path, allows, token=value):
+            continue
+        if any(not doctor.tomb_exempt_at(text, m.start(), m.end(), spans)
+               for m in rx.finditer(text)):
+            found.append(value)
+    return found
+
+
+def new_hits(text, rows, allows=(), path="knowledge/example.md"):
+    found = []
+    spans = doctor.struck_spans(text)
+    folded = doctor.tomb_fold(text)
+    for value, rx in rows:
+        if not doctor.tomb_might_contain(doctor.tomb_anchor(value, rx), folded):
+            continue
+        if any(not doctor.tomb_exempt_at(text, m.start(), m.end(), spans)
+               for m in rx.finditer(text)) and not doctor.allowed(
+                   "tombstones", path, allows, token=value):
+            found.append(value)
+    return found
+
+
+class PrefilterParity(unittest.TestCase):
+    def setUp(self):
+        self.value = "retiredvalue"
+        self.rx = re.compile(r"(?<![A-Za-z0-9])" + re.escape(self.value)
+                             + r"(?![A-Za-z0-9])", re.I)
+        self.rows = [(self.value, self.rx)]
+
+    def test_ascii_boundary_and_case(self):
+        for text in ("RETIREDVALUE", "xretiredvalue", "retiredvaluez",
+                     "other retiredvalue here", "nothing relevant"):
+            with self.subTest(text=text):
+                self.assertEqual(old_hits(text, self.rows), new_hits(text, self.rows))
+
+    def test_unicode_case_insensitive_normalizes(self):
+        for value, text in (("iabcde", "İabcde"), ("iabcde", "ıabcde"),
+                            ("sabcde", "ſabcde"), ("kabcde", "Kabcde")):
+            rx = re.compile(r"(?<![A-Za-z0-9])" + re.escape(value)
+                            + r"(?![A-Za-z0-9])", re.I)
+            with self.subTest(value=value, text=text):
+                self.assertEqual([value], old_hits(text, [(value, rx)]))
+                self.assertIsNotNone(doctor.tomb_fold(text))
+                self.assertEqual(old_hits(text, [(value, rx)]),
+                                 new_hits(text, [(value, rx)]))
+
+    def test_unicode_runtime_check_falls_back_if_changed(self):
+        row = ("iabcde", re.compile(r"(?<![A-Za-z0-9])iabcde(?![A-Za-z0-9])", re.I))
+        with patch.object(doctor, "tomb_unicode_safe", return_value=False):
+            self.assertIsNone(doctor.tomb_fold("İabcde"))
+            self.assertEqual(old_hits("İabcde", [row]), new_hits("İabcde", [row]))
+
+    def test_punctuation_and_spaces_are_mandatory_fragments(self):
+        for value, anchor in (("$31,500", "$31,500"),
+                              ("¥456,000", "456,000"),
+                              ("$4.2k–9.6k", "$4.2k"),
+                              ("old price", "old price")):
+            rx = re.compile(r"(?<![A-Za-z0-9])" + re.escape(value)
+                            + r"(?![A-Za-z0-9])", re.I)
+            with self.subTest(value=value):
+                self.assertEqual(anchor, doctor.tomb_anchor(value, rx))
+                self.assertEqual(old_hits(value, [(value, rx)]),
+                                 new_hits(value, [(value, rx)]))
+                if " " in value:
+                    split = value.replace(" ", "</p><p>")
+                    self.assertEqual([], old_hits(split, [(value, rx)]))
+                    self.assertEqual(old_hits(split, [(value, rx)]),
+                                     new_hits(split, [(value, rx)]))
+
+    def test_unicode_nonmatch_is_screened(self):
+        folded = doctor.tomb_fold("é not here")
+        self.assertIsNotNone(folded)
+        self.assertFalse(doctor.tomb_might_contain("retiredvalue", folded))
+        self.assertEqual(old_hits("é not here", self.rows),
+                         new_hits("é not here", self.rows))
+
+    def test_unknown_pattern_falls_back(self):
+        for rx in (re.compile(r"(?:retiredvalue|other)"),
+                   re.compile(r"(?:retiredvalue)?"), re.compile(r"retired.*value")):
+            with self.subTest(pattern=rx.pattern):
+                self.assertIsNone(doctor.tomb_anchor(self.value, rx))
+                self.assertEqual(old_hits("retiredvalue", [(self.value, rx)]),
+                                 new_hits("retiredvalue", [(self.value, rx)]))
+
+    def test_office_xml_and_exemptions(self):
+        xml = b"<document><body><p>retiredvalue</p></body></document>"
+        body = io.BytesIO()
+        with zipfile.ZipFile(body, "w") as z:
+            z.writestr("word/document.xml", xml)
+        valid, text = doctor.office_ok(body.getvalue(), ".docx")
+        self.assertTrue(valid)
+        for content in (text, "superseded retiredvalue", "~~retiredvalue~~ retiredvalue"):
+            with self.subTest(content=content):
+                self.assertEqual(old_hits(content, self.rows), new_hits(content, self.rows))
+        unicode_xml = b"<document><body><p>\xc4\xb0abcde</p></body></document>"
+        body = io.BytesIO()
+        with zipfile.ZipFile(body, "w") as z:
+            z.writestr("word/document.xml", unicode_xml)
+        valid, text = doctor.office_ok(body.getvalue(), ".docx")
+        self.assertTrue(valid)
+        unicode_row = ("iabcde", re.compile(r"(?<![A-Za-z0-9])iabcde(?![A-Za-z0-9])", re.I))
+        self.assertEqual(old_hits(text, [unicode_row]), new_hits(text, [unicode_row]))
+
+    def test_token_scoped_allow_keeps_other_value(self):
+        other = "otherretired"
+        rx = re.compile(r"(?<![A-Za-z0-9])" + other + r"(?![A-Za-z0-9])", re.I)
+        rows = self.rows + [(other, rx)]
+        allows = [("tombstones", "knowledge/example.md", self.value)]
+        text = "retiredvalue otherretired"
+        self.assertEqual([other], old_hits(text, rows, allows))
+        self.assertEqual(old_hits(text, rows, allows), new_hits(text, rows, allows))
+
+
+if __name__ == "__main__":
+    unittest.main()

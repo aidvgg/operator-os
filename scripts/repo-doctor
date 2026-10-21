@@ -32,6 +32,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 
@@ -322,6 +323,8 @@ TOMB_BANNER_EXACT = re.compile(r"^\s*\*\*SUPERSEDED\b[^*]*\*\*[.\s]*$")
 # Office payloads have no lines, so the exemption is proximity-scoped instead: a marker
 # counts only within this many characters of the hit in the extracted XML text.
 TOMB_EXEMPT_WINDOW = 300
+TOMB_CASE_EQUIV = {"İ": "i", "ı": "i", "ſ": "s", "K": "k"}
+TOMB_CASE_TRANSLATION = str.maketrans(TOMB_CASE_EQUIV)
 
 # dead-artifact-ref: a .md file whose head declares itself DEAD/OVERTAKEN must not be
 # referenced un-struck in live-sounding text. Traces to the "snapshot drift" hazard in
@@ -412,6 +415,36 @@ def load_tombstones():
         rows.append((s, re.compile(
             r"(?<![A-Za-z0-9])" + re.escape(s) + r"(?![A-Za-z0-9])", re.I)))
     return rows
+
+
+def tomb_anchor(value, rx):
+    """Return a mandatory ASCII run only for the exact literal tombstone regex shape."""
+    if rx.pattern != r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])":
+        return None
+    runs = re.findall(r"[\x00-\x7f]{5,}", value)
+    return max(runs, key=len).lower() if runs else None
+
+
+@lru_cache(maxsize=1)
+def tomb_unicode_safe():
+    """Disable Unicode screening if this interpreter's re.I ASCII classes differ."""
+    nonascii = "".join(map(chr, range(128, 0x110000)))
+    matches = set(re.findall(r"[A-Za-z0-9]", nonascii, re.I))
+    return matches == set(TOMB_CASE_EQUIV) and all(
+        re.fullmatch(re.escape(mapped), char, re.I)
+        for char, mapped in TOMB_CASE_EQUIV.items())
+
+
+def tomb_fold(text):
+    """Normalize mandatory ASCII fragments, or fall back to the original regex."""
+    if text.isascii():
+        return text.lower()
+    return text.translate(TOMB_CASE_TRANSLATION).lower() if tomb_unicode_safe() else None
+
+
+def tomb_might_contain(anchor, folded_ascii):
+    """An absent anchor or unsafe Unicode normalization keeps the original regex path."""
+    return anchor is None or folded_ascii is None or anchor in folded_ascii
 
 
 def _digit_run(sep: str) -> str:
@@ -1341,6 +1374,7 @@ def main() -> int:
                     + ", ".join(_tsc) + "), so tombstone findings this run cannot be trusted")
     if tombs:
         tomb_soft = []
+        anchors = {s: tomb_anchor(s, rx) for s, rx in tombs}
         for f in files:
             if f.startswith("ai/") or f == TOMB_FILE or f not in file_text:
                 continue
@@ -1360,12 +1394,13 @@ def main() -> int:
                 # restores the earlier behaviour for that case.
                 txt = file_text[f]
                 spans = struck_spans(txt)
+                folded = tomb_fold(txt)
                 for s, rx in tombs:
-                    if allowed("tombstones", f, allows, token=s):
+                    if not tomb_might_contain(anchors[s], folded):
                         continue
                     hit = next((m for m in rx.finditer(txt)
                                 if not tomb_exempt_at(txt, m.start(), m.end(), spans)), None)
-                    if hit is not None:
+                    if hit is not None and not allowed("tombstones", f, allows, token=s):
                         msg = (f"tombstones: {f} carries retired value \"{s}\" in its extracted "
                                f"text with no supersession marker within "
                                f"{TOMB_EXEMPT_WINDOW} chars, live authority in {TOMB_FILE}")
@@ -1378,13 +1413,14 @@ def main() -> int:
                 continue  # the file declares itself historical, in the form doctrine prescribes
             for i, ln in enumerate(lines, 1):
                 spans = struck_spans(ln)
+                folded = tomb_fold(ln)
                 for s, rx in tombs:
                     # Token-scoped allow at the EMISSION site, and NO break across rows: an allow
                     # entry for the first dead string on a line used to silence a live second one.
-                    if allowed("tombstones", f, allows, token=s):
+                    if not tomb_might_contain(anchors[s], folded):
                         continue
                     if any(not tomb_exempt_at(ln, m.start(), m.end(), spans)
-                           for m in rx.finditer(ln)):
+                           for m in rx.finditer(ln)) and not allowed("tombstones", f, allows, token=s):
                         msg = (f"tombstones: {f}:{i} carries retired value \"{s}\" "
                                f"un-bannered, live authority in {TOMB_FILE}")
                         (hard if is_hard else tomb_soft).append(msg)

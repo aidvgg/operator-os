@@ -81,7 +81,10 @@ fi
 # Throwaway scan base. mktemp, not a fixed path, so two concurrent pushes (or a second clone of
 # this repo) cannot delete each other's live scan worktree mid-run. Portable: `$TMPDIR` when the
 # platform sets one (macOS does), `/tmp` otherwise (Linux); a hardcoded /private/tmp blocked every
-# hooked push from a Linux clone. Fail loud if mktemp cannot deliver.
+# hooked push from a Linux clone. Fail loud if mktemp cannot deliver. Fixed umask, so the scan
+# worktree's files are 0644 whatever the caller's umask: a service manager running with umask 0002
+# otherwise fails the generated-surface mode check on every push.
+umask 022
 SCAN_TMP="${TMPDIR:-/tmp}"
 SCAN_TMP="${SCAN_TMP%/}"
 SCAN_BASE=$(mktemp -d "${SCAN_TMP}/operator-os-prepush.XXXXXXXX") || {
