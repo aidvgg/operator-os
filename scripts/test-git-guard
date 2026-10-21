@@ -39,6 +39,7 @@ CODEX_HOOKS = os.path.join(ROOT, ".codex", "hooks.json")
 USER_NAME = pwd.getpwuid(os.getuid()).pw_name
 USER_HOME = os.path.expanduser("~" + USER_NAME)
 ROOT_GLOB_FROM_HOME = shlex.quote(os.path.relpath(ROOT, USER_HOME)) + "/.e*"
+GROK_HOOKS = os.path.join(ROOT, ".grok", "hooks", "guards.json")
 
 
 def call(tool_name, **tool_input):
@@ -387,6 +388,8 @@ WIRING = [
     (SETTINGS, ENV_HOOK, (), True),
     (CODEX_HOOKS, GIT_HOOK, ("Bash",), False),
     (CODEX_HOOKS, ENV_HOOK, (), True),
+    (GROK_HOOKS, GIT_HOOK, ("run_terminal_command",), False),
+    (GROK_HOOKS, ENV_HOOK, (), True),
 ]
 
 MALFORMED_ENV_DENY = [

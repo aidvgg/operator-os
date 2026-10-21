@@ -1,0 +1,44 @@
+{
+  "description": "Operator OS lifecycle hooks for Grok Build. Counterpart of the hooks block in .claude/settings.json and .codex/hooks.json; all three invoke the same scripts under .claude/hooks/ so there is one owner per guard. Folder trust makes these run; until the folder is trusted they are silently skipped.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/repo-doctor\" 2>&1 || true",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/horizon\" --brief 2>&1 || true",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/deny-env-access.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "run_terminal_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/deny-destructive-git.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
