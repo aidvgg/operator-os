@@ -28,13 +28,17 @@ gets better on a second look.
 
 Usage:
   scripts/x-fetch <handle> [--posts N] [--json] [--provider auto|twitterapi|brightdata]
+  scripts/x-fetch --article <status URL or id> [--json]
 
   <handle>     @handle, bare handle, or an x.com/twitter.com profile URL. Required.
                There is deliberately no default handle: a default is how a tool ends up
                silently reporting on the wrong account.
-  --posts N    how many recent posts to pull (default 20, max 200)
+  --article    pull the full text of an X Article by status URL or numeric id
+  --posts N    how many recent posts to pull (default 20, max 1000)
   --json       raw JSON instead of the text digest
   --provider   auto (default) tries twitterapi.io then falls back to Bright Data
+  --include-replies  include replies in twitterapi.io results
+  --via timeline|search  choose twitterapi.io's timeline or advanced search endpoint
 
 Auth: TWITTERAPI_IO_API_KEY and BRIGHTDATA_API_KEY, from the environment first, else from
 the gitignored env file at the repo root (copy .env.example to start). Keys are read
@@ -225,14 +229,17 @@ def tapi_get(path, params, key):
     return http_json(req, "twitterapi.io", path, 30)
 
 
-def tapi_fetch(handle, want, key):
+def tapi_fetch(handle, want, key, include_replies=False):
     data = tapi_get("/twitter/user/info", {"userName": handle}, key)
     if data.get("status") != "success" or not data.get("data"):
         raise ProviderError(f"twitterapi.io: {data.get('msg') or 'no profile returned'}")
     p = data["data"]
     tweets, cursor = [], ""
     while len(tweets) < want:
-        d = tapi_get("/twitter/user/last_tweets", {"userName": handle, "cursor": cursor}, key)
+        params = {"userName": handle, "cursor": cursor}
+        if include_replies:
+            params["includeReplies"] = "true"
+        d = tapi_get("/twitter/user/last_tweets", params, key)
         page = d.get("tweets")
         if page is None and isinstance(d.get("data"), dict):
             page = d["data"].get("tweets")
@@ -249,17 +256,89 @@ def tapi_fetch(handle, want, key):
         "posts_count": p.get("statusesCount"), "joined": p.get("createdAt"),
         "verified": bool(p.get("isBlueVerified")), "link": p.get("url"),
     }
-    posts = [{
-        "text": t.get("text"), "date": t.get("createdAt"), "url": t.get("url"),
-        "likes": t.get("likeCount"), "reposts": t.get("retweetCount"),
-        "replies": t.get("replyCount"), "views": t.get("viewCount"),
-    } for t in tweets[:want]]
+    posts = [tweet_record(t) for t in tweets[:want]]
     return profile, posts, "twitterapi.io"
+
+
+def tapi_search(handle, want, key, include_replies=False):
+    data = tapi_get("/twitter/user/info", {"userName": handle}, key)
+    if data.get("status") != "success" or not data.get("data"):
+        raise ProviderError(f"twitterapi.io: {data.get('msg') or 'no profile returned'}")
+    p = data["data"]
+    query = f"from:{handle}" + ("" if include_replies else " -filter:replies")
+    tweets, cursor, seen = [], "", set()
+    while len(tweets) < want:
+        d = tapi_get("/twitter/tweet/advanced_search",
+                     {"query": query, "queryType": "Latest", "cursor": cursor}, key)
+        page = d.get("tweets")
+        if page is None and isinstance(d.get("data"), dict):
+            page = d["data"].get("tweets")
+        fresh = [t for t in (page or []) if t.get("id") not in seen]
+        if not fresh:
+            break
+        for tweet in fresh:
+            seen.add(tweet.get("id"))
+        tweets.extend(fresh)
+        if not d.get("has_next_page") or not d.get("next_cursor"):
+            break
+        cursor = d["next_cursor"]
+    profile = {
+        "handle": p.get("userName"), "name": p.get("name"),
+        "bio": p.get("description"), "location": p.get("location"),
+        "followers": p.get("followers"), "following": p.get("following"),
+        "posts_count": p.get("statusesCount"), "joined": p.get("createdAt"),
+        "verified": bool(p.get("isBlueVerified")), "link": p.get("url"),
+    }
+    posts = [tweet_record(t) for t in tweets[:want]]
+    return profile, posts, "twitterapi.io/search"
+
+
+def tweet_record(tweet):
+    return {
+        "id": tweet.get("id"), "text": tweet.get("text"),
+        "date": tweet.get("createdAt"), "url": tweet.get("url"),
+        "likes": tweet.get("likeCount"), "reposts": tweet.get("retweetCount"),
+        "replies": tweet.get("replyCount"), "views": tweet.get("viewCount"),
+        "quotes": tweet.get("quoteCount"), "bookmarks": tweet.get("bookmarkCount"),
+        "is_reply": bool(tweet.get("isReply")) or bool(tweet.get("inReplyToId")),
+        "is_retweet": bool(tweet.get("retweeted_tweet")),
+        "is_quote": bool(tweet.get("quoted_tweet")),
+    }
+
+
+def article(ref, want_json):
+    match = re.search(r"(\d{6,})", ref)
+    if not match:
+        sys.exit("x-fetch: --article needs a status URL or numeric id")
+    key = load_key("TWITTERAPI_IO_API_KEY")
+    if not key:
+        sys.exit("x-fetch: no TWITTERAPI_IO_API_KEY configured")
+    req = urllib.request.Request(
+        f"{TAPI}/twitter/article?{urllib.parse.urlencode({'tweet_id': match.group(1)})}",
+        headers={"X-API-Key": key})
+    try:
+        data = http_json(req, "twitterapi.io", "/twitter/article", 30)
+    except ProviderError as exc:
+        sys.exit(f"x-fetch: {exc}")
+    record = data.get("article")
+    if data.get("status") != "success" or not record:
+        sys.exit(f"x-fetch: no article for {match.group(1)}: {data.get('msg')}")
+    if want_json:
+        print(json.dumps(record, ensure_ascii=False, indent=2))
+        return 0
+    lines = [f"# {record.get('title')}",
+             f"{record.get('createdAt')} | views {record.get('viewCount')} | likes {record.get('likeCount')}", ""]
+    for block in record.get("contents") or []:
+        body, kind = block.get("text", ""), block.get("type", "")
+        lines.append(f"\n## {body}" if kind.startswith("header") else
+                     f"- {body}" if "list" in kind else body)
+    print("\n".join(lines))
+    return 0
 
 
 # ------------------------------------------------------------------ Bright Data
 
-def bd_fetch(handle, want, key):
+def bd_fetch(handle, want, key, include_replies=False):
     body = json.dumps({"input": [{"url": f"https://x.com/{handle}"}]}).encode()
     url = f"{BD}/scrape?dataset_id={BD_X_PROFILES}&include_errors=true"
     req = urllib.request.Request(
@@ -380,12 +459,26 @@ def main(argv):
         print(__doc__.strip())
         return 0
     want_json = "--json" in argv
+    if "--article" in argv:
+        i = argv.index("--article")
+        if i + 1 >= len(argv):
+            sys.exit("x-fetch: --article needs a status URL or numeric id")
+        return article(argv[i + 1], want_json)
+    include_replies = "--include-replies" in argv
+    argv = [arg for arg in argv if arg != "--include-replies"]
     want = 20
     provider = "auto"
+    via = "timeline"
+    if "--via" in argv:
+        i = argv.index("--via")
+        if i + 1 >= len(argv) or argv[i + 1] not in ("timeline", "search"):
+            sys.exit("x-fetch: --via needs timeline or search")
+        via = argv[i + 1]
+        del argv[i:i + 2]
     if "--posts" in argv:
         i = argv.index("--posts")
         try:
-            want = min(int(argv[i + 1]), 200)
+            want = min(int(argv[i + 1]), 1000)
         except (IndexError, ValueError):
             sys.exit("x-fetch: --posts needs a number")
         del argv[i:i + 2]
@@ -405,7 +498,8 @@ def main(argv):
 
     chain = []
     if provider in ("auto", "twitterapi"):
-        chain.append(("twitterapi.io", tapi_fetch, tkey, "TWITTERAPI_IO_API_KEY"))
+        chain.append(("twitterapi.io", tapi_search if via == "search" else tapi_fetch,
+                      tkey, "TWITTERAPI_IO_API_KEY"))
     if provider in ("auto", "brightdata"):
         chain.append(("Bright Data", bd_fetch, bkey, "BRIGHTDATA_API_KEY"))
     if not chain:
@@ -420,7 +514,7 @@ def main(argv):
             problems.append(f"{label}: no {envvar} configured")
             continue
         try:
-            profile, posts, source = fn(handle, want, key)
+            profile, posts, source = fn(handle, want, key, include_replies)
         except ProviderError as e:
             problems.append(str(e))
             # Always on stderr, in every mode: stdout stays parseable JSON either way, and

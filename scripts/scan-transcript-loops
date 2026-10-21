@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Flag machine transcripts whose decoder fell into a repetition loop mid-recording.
+
+Usage:
+  scripts/scan-transcript-loops TRANSCRIPT.json [TRANSCRIPT.json ...]
+  scripts/scan-transcript-loops --root DIRECTORY
+
+Reads the raw backend JSON written by scripts/transcribe-media and the duration
+header of its same-stem Markdown sibling. A loop-evidence span is either a run
+of at least RUN_LENGTH consecutive nonempty segments with identical text, or one
+segment whose compression ratio is at least MIN_COMPRESSION and whose word
+stream repeats some NGRAM-word sequence at least NGRAM_REPEATS times. Spans are
+clipped at duration - TAIL_SECONDS so closing sign-off repetition stays
+separate. A transcript triggers when its body spans cover TRIGGER_SECONDS or
+more. A trigger is resolved only by a same-stem `-loop-recovery.json` sibling
+whose own body loop evidence is below the trigger.
+
+Prints one JSON record per primary transcript. Exit 0 when every trigger is
+resolved, 1 when any trigger is unresolved, 2 on unusable input.
+"""
+import argparse
+import json
+import math
+import pathlib
+import re
+import sys
+from collections import Counter
+
+RUN_LENGTH = 3
+NGRAM = 6
+NGRAM_REPEATS = 3
+MIN_COMPRESSION = 2.4  # Whisper's own compression_ratio_threshold for a failed decode
+TAIL_SECONDS = 30.0
+TRIGGER_SECONDS = 15.0
+RECOVERY_SUFFIX = "-loop-recovery"
+DURATION_HEADER = re.compile(r"^- Duration seconds: `([0-9.eE+-]+)`$", re.MULTILINE)
+
+
+class InputError(Exception):
+    pass
+
+
+def repeats_phrase(text):
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    grams = Counter(tuple(words[i:i + NGRAM]) for i in range(len(words) - NGRAM + 1))
+    return bool(grams) and max(grams.values()) >= NGRAM_REPEATS
+
+
+def loop_spans(segments):
+    spans = []
+    run = []
+    run_text = None
+    for segment in segments:
+        text = (segment.get("text") or "").strip()
+        if not text:
+            continue  # backend-cleared records are not speech and do not break a run
+        start, end = sorted((float(segment["start"]), float(segment["end"])))
+        ratio = segment.get("compression_ratio")
+        if (isinstance(ratio, (int, float)) and math.isfinite(ratio)
+                and ratio >= MIN_COMPRESSION and repeats_phrase(text)):
+            spans.append((start, end))
+        if text == run_text:
+            run.append((start, end))
+            continue
+        if len(run) >= RUN_LENGTH:
+            spans.append((min(s for s, _ in run), max(e for _, e in run)))
+        run, run_text = [(start, end)], text
+    if len(run) >= RUN_LENGTH:
+        spans.append((min(s for s, _ in run), max(e for _, e in run)))
+    return spans
+
+
+def covered_seconds(spans, low, high):
+    clipped = sorted((max(s, low), min(e, high)) for s, e in spans if min(e, high) > max(s, low))
+    total, current = 0.0, None
+    for start, end in clipped:
+        if current is None or start > current[1]:
+            if current is not None:
+                total += current[1] - current[0]
+            current = [start, end]
+        else:
+            current[1] = max(current[1], end)
+    if current is not None:
+        total += current[1] - current[0]
+    return round(total, 3)
+
+
+def measure(json_path):
+    markdown = json_path.with_suffix(".md")
+    if not markdown.is_file():
+        raise InputError(f"{json_path}: duration header not found (missing Markdown sibling)")
+    match = DURATION_HEADER.search(markdown.read_text(encoding="utf-8"))
+    if not match:
+        raise InputError(f"{json_path}: duration header not found in {markdown.name}")
+    duration = float(match.group(1))
+    try:
+        segments = json.loads(json_path.read_bytes())["segments"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise InputError(f"{json_path}: unreadable backend JSON ({error})") from error
+    spans = loop_spans(segments)
+    cutoff = max(0.0, duration - TAIL_SECONDS)
+    return duration, covered_seconds(spans, 0.0, cutoff), covered_seconds(spans, cutoff, duration)
+
+
+def scan(json_path):
+    duration, body, tail = measure(json_path)
+    trigger = body >= TRIGGER_SECONDS
+    recovery = json_path.with_name(json_path.stem + RECOVERY_SUFFIX + ".json")
+    recovery_body = measure(recovery)[1] if recovery.is_file() else None
+    if not trigger:
+        status = "clear"
+    elif recovery_body is None:
+        status = "unrecovered"
+    elif recovery_body >= TRIGGER_SECONDS:
+        status = "recovery-still-looping"
+    else:
+        status = "recovered"
+    return {
+        "path": str(json_path),
+        "duration_seconds": duration,
+        "loop_evidence_body_seconds": body,
+        "loop_evidence_tail_seconds": tail,
+        "trigger": trigger,
+        "recovery_path": str(recovery) if recovery.is_file() else None,
+        "recovery_body_seconds": recovery_body,
+        "status": status,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("transcripts", nargs="*", type=pathlib.Path)
+    parser.add_argument("--root", type=pathlib.Path)
+    args = parser.parse_args()
+    paths = list(args.transcripts)
+    if args.root is not None:
+        paths.extend(sorted(args.root.rglob("*.json")))
+    primaries = [path for path in paths if not path.stem.endswith(RECOVERY_SUFFIX)]
+    if not primaries:
+        raise InputError("no primary transcript JSON given")
+    unresolved = False
+    for path in primaries:
+        record = scan(path)
+        unresolved |= record["status"] in ("unrecovered", "recovery-still-looping")
+        print(json.dumps(record, sort_keys=True))
+    return 1 if unresolved else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except InputError as error:
+        print(f"scan-transcript-loops: {error}", file=sys.stderr)
+        sys.exit(2)
