@@ -1,0 +1,29 @@
+# Architecture
+
+**Status:** Initial map. Replace every placeholder with observed or decided project-specific state.
+
+## System boundary
+
+<What this system owns, what it calls, and what remains external.>
+
+## Domains and dependency direction
+
+| Domain or layer | Owns | May depend on | Public boundary |
+|---|---|---|---|
+| `<name>` | `<state and behavior>` | `<allowed dependencies>` | `<API, event, type, or none>` |
+
+## Runtime paths
+
+<Name the primary user journeys and the components each crosses.>
+
+## Invariants
+
+- `<Mechanically enforceable architectural rule>`
+
+## Data and external systems
+
+<Schemas, migrations, integrations, consistency boundaries, and failure behavior.>
+
+## Verification
+
+<Commands or tests that prove dependency direction and public contracts still hold.>

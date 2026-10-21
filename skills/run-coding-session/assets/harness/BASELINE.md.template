@@ -1,0 +1,60 @@
+# Repository baseline
+
+**Snapshot:** This file records observed state at one commit. It is not a live status page.
+
+- Captured at: `<timestamp and timezone>`
+- Target: `<absolute path>`
+- Git root: `<absolute path or none>`
+- Branch and commit: `<branch> @ <commit>`
+- Pre-existing changes: `<paths or clean>`
+
+## Evidence convention
+
+- **OBSERVED:** named file, command, or runtime result.
+- **INFERRED:** evidence-backed interpretation not declared by the repository.
+- **UNKNOWN:** absent, contradictory, inaccessible, or not safely testable.
+
+## Instruction map
+
+<Instruction file, scope, and precedence.>
+
+## Declared purpose
+
+<What the repository says it is, plus product unknowns.>
+
+## Topology and runtime
+
+<Entrypoints, domains, data flows, integrations, generated surfaces, and deployment boundary.>
+
+## Toolchain
+
+<Languages, runtimes, package managers, manifests, lockfiles, and local start path.>
+
+## Validation state
+
+| Command | Result | Evidence or first actionable failure |
+|---|---|---|
+| `<command>` | `PASS`, `FAIL`, or `NOT RUN` | `<result>` |
+
+## Existing control surfaces
+
+| Capability | Owner or equivalent | Gap |
+|---|---|---|
+| Agent entry map | `<path>` | `<none or missing behavior>` |
+| Architecture | `<path>` | `<gap>` |
+| Product and quality | `<path>` | `<gap>` |
+| Active plans and decisions | `<path>` | `<gap>` |
+| Unified gate | `<command or path>` | `<gap>` |
+| Runtime evaluation | `<tool or path>` | `<gap>` |
+
+## Risks, debt, and contradictions
+
+<Only task-relevant observed or inferred findings.>
+
+## Unknowns
+
+<Questions repository evidence cannot answer.>
+
+## Baseline boundary
+
+<What was excluded, inaccessible, generated, or deliberately not executed.>

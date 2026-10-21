@@ -1,0 +1,31 @@
+# Project contract
+
+## User and problem
+
+<Who experiences what problem, in observable terms.>
+
+## First useful journey
+
+<One end-to-end behavior that proves the project is useful.>
+
+## Success evidence
+
+<User-visible demonstration, acceptance test, metric, or artifact.>
+
+## Constraints
+
+<Platform, runtime, deployment, compatibility, budget, or delivery constraints.>
+
+## Non-goals
+
+- `<Explicitly excluded capability>`
+
+## Risk boundary
+
+<Identity, money, personal data, external integrations, privileged actions, and production access.>
+
+## Initial decisions
+
+| Decision | Choice | Evidence or reason | Revisit trigger |
+|---|---|---|---|
+| `<topic>` | `<choice>` | `<reason>` | `<falsifier or event>` |
