@@ -6,6 +6,11 @@ tools: Read, Grep, Glob, Bash
 You verify a draft deliverable against the repo's canonical sources. You did not write the draft and
 you must not trust it. Re-derive every checkable fact independently, then compare.
 
+Ask before assert, calculate before confirm: identify the source for each quantity, date, duration,
+motive, or derived value; normalize currency, unit, and period before recomputing. A mismatch stays
+unresolved and fails verification until a canonical or operator-supplied input changes. Never turn
+your calculation into an operator-stated fact.
+
 Bash is for read-only extraction ONLY (for example `unzip -p`, `pdftotext`, `textutil` into
 `/private/tmp`, running `scripts/pdf-check` or `scripts/docx-check`). This repo lives on a
 case-insensitive filesystem and a stray redirect from a verifier has cost a live file before. NEVER
@@ -20,6 +25,10 @@ Re-derive from these authorities (read them, do not recall):
 - Amounts, engagement structure, billing cadence: `knowledge/memory.md` plus the client's roadmap or
   status file under `knowledge/clients/<client>/` plus the per-invoice records in
   `knowledge/business/invoices/`.
+- Invoice arithmetic: independently recompute invoice JSON and PDF amounts in minor units: line
+  items = subtotal, subtotal + tax = total, schedule rows = contract total, exactly one schedule row
+  is current, and current-row amount = invoice total when a schedule exists. Generator validation is
+  a separate floor, not evidence that amounts match the canonical engagement.
 - Bill-to / from entities: prior invoices for the same engagement. Entity continuity matters,
   because a client can contract from more than one legal entity and the right one is
   per engagement, not per client.

@@ -78,6 +78,27 @@ function fail(msg) {
   process.exit(1);
 }
 
+const CURRENCY_SYMBOLS = { '$': 'USD', '€': 'EUR', '£': 'GBP' };
+
+function formatMinorUnits(value) {
+  const negative = value < 0n;
+  const absolute = negative ? -value : value;
+  const units = (absolute / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const cents = (absolute % 100n).toString().padStart(2, '0');
+  return `${negative ? '-' : ''}${units}.${cents}`;
+}
+
+function parseAmount(value, field, invoiceCurrency) {
+  const match = /^(-)?(?:(\$|€|£)|([A-Za-z]{3})\s+)?(0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})*)\.(\d{2})$/.exec(value);
+  if (!match) fail(`data JSON invalid: ${field} has malformed amount ${JSON.stringify(value)}`);
+  const statedCurrency = match[2] ? CURRENCY_SYMBOLS[match[2]] : match[3] && match[3].toUpperCase();
+  if (statedCurrency && statedCurrency !== invoiceCurrency) {
+    fail(`data JSON invalid: ${field} uses ${statedCurrency} but invoice currency is ${invoiceCurrency}`);
+  }
+  const minorUnits = BigInt(match[4].replace(/,/g, '')) * 100n + BigInt(match[5]);
+  return match[1] ? -minorUnits : minorUnits;
+}
+
 // ---------------------------------------------------------------------------
 // Data validation - every defect fails loudly here, never as a stack trace or
 // as the string "null"/"undefined" printed onto a client-facing invoice.
@@ -116,7 +137,12 @@ function validate(d) {
     d.schedule.rows.forEach((r, i) => {
       need(r && isStr(r.label) && isStr(r.period) && isStr(r.status) && isStr(r.amount),
         `schedule.rows[${i}] needs "label", "period", "status", "amount" strings`);
+      need(r.current === undefined || typeof r.current === 'boolean',
+        `schedule.rows[${i}].current must be a boolean when present`);
     });
+    const currentRows = d.schedule.rows.filter((r) => r.current === true);
+    need(currentRows.length === 1,
+      `schedule must have exactly one row with current set to true (got ${currentRows.length})`);
     need(isStr(d.schedule.contractTotal), '"schedule.contractTotal" must be a non-empty string');
   }
   need(d.notes === undefined || (Array.isArray(d.notes) && d.notes.every(isStr)),
@@ -129,6 +155,37 @@ function validate(d) {
   }
   for (const f of ['tax', 'currency', 'payableByNote', 'closingNote', 'signName', 'signTitle', 'footerLeft']) {
     need(d[f] === undefined || isStr(d[f]), `"${f}" must be a non-empty string when present`);
+  }
+
+  const invoiceCurrency = d.currency === undefined ? 'USD' : d.currency.trim().toUpperCase();
+  need(/^[A-Z]{3}$/.test(invoiceCurrency),
+    `"currency" must be a three-letter currency code when present (got ${JSON.stringify(d.currency)})`);
+  d.currency = invoiceCurrency;
+  const lineItemTotal = d.lineItems.reduce(
+    (sum, item, i) => sum + parseAmount(item.amount, `lineItems[${i}].amount`, invoiceCurrency), 0n
+  );
+  const subtotal = parseAmount(d.subtotal, 'subtotal', invoiceCurrency);
+  if (lineItemTotal !== subtotal) {
+    fail(`data JSON invalid: lineItems sum ${formatMinorUnits(lineItemTotal)} does not equal subtotal ${formatMinorUnits(subtotal)}`);
+  }
+  const tax = parseAmount(d.tax === undefined ? '0.00' : d.tax, 'tax', invoiceCurrency);
+  const total = parseAmount(d.total, 'total', invoiceCurrency);
+  if (subtotal + tax !== total) {
+    fail(`data JSON invalid: subtotal ${formatMinorUnits(subtotal)} plus tax ${formatMinorUnits(tax)} does not equal total ${formatMinorUnits(total)}`);
+  }
+  if (d.schedule !== undefined) {
+    const scheduleTotal = d.schedule.rows.reduce(
+      (sum, row, i) => sum + parseAmount(row.amount, `schedule.rows[${i}].amount`, invoiceCurrency), 0n
+    );
+    const contractTotal = parseAmount(d.schedule.contractTotal, 'schedule.contractTotal', invoiceCurrency);
+    if (scheduleTotal !== contractTotal) {
+      fail(`data JSON invalid: schedule.rows sum ${formatMinorUnits(scheduleTotal)} does not equal schedule.contractTotal ${formatMinorUnits(contractTotal)}`);
+    }
+    const currentRow = d.schedule.rows.find((row) => row.current === true);
+    const currentAmount = parseAmount(currentRow.amount, 'schedule current row amount', invoiceCurrency);
+    if (currentAmount !== total) {
+      fail(`data JSON invalid: schedule current row amount ${formatMinorUnits(currentAmount)} does not equal invoice total ${formatMinorUnits(total)}`);
+    }
   }
 
   const flat = JSON.stringify(d);
@@ -533,21 +590,33 @@ function printPdf(htmlPath, pdfPath) {
 // Main
 // ---------------------------------------------------------------------------
 
+function loadAndValidate(dataPath) {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+  } catch (e) {
+    fail(`cannot read data JSON at ${dataPath}: ${e.message}`);
+  }
+  validate(data);
+  return data;
+}
+
 async function main() {
-  const [dataPath, pdfPath] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  if (args[0] === '--check-data') {
+    if (args.length !== 2) fail('usage: node generate-invoice-html.js --check-data <data.json>');
+    loadAndValidate(args[1]);
+    console.log('VALID: invoice data');
+    return;
+  }
+  const [dataPath, pdfPath] = args;
   if (!dataPath || !pdfPath) {
     fail('usage: node generate-invoice-html.js <data.json> <output.pdf>');
   }
   if (!/\.pdf$/i.test(pdfPath)) {
     fail(`output path must end in .pdf (got ${pdfPath})`);
   }
-  let d;
-  try {
-    d = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
-  } catch (e) {
-    fail(`cannot read data JSON at ${dataPath}: ${e.message}`);
-  }
-  validate(d);
+  const d = loadAndValidate(dataPath);
 
   const absPdf = path.resolve(pdfPath);
   const htmlPath = absPdf.replace(/\.pdf$/i, '.html');
