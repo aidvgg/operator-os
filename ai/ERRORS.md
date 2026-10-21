@@ -54,7 +54,7 @@ near-miss behind it does not belong in this section.
   source-shape test there is; and the allow file expires its own entries, so an exception cannot
   outlive the thing it excused. The real control is the **guardrail-fixture suite** specified in
   `knowledge/ops/os-roadmap.md`: known-bad fixtures plus a runner that asserts each check still
-  flags its own fixture. Its first standing member, `scripts/test-git-guard`, now carries 414
+  flags its own fixture. Its first standing member, `scripts/test-git-guard`, now carries 412
   assertions across both PreToolUse guards and all three host wiring files. Until the repo-doctor
   manifest exists, the remaining checks are still trusted rather than tested, and single-sourcing
   each fact a check guards, per `CLAUDE.md`, is what keeps the gap from growing.
