@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""CLI surface for the shared agent deny guards (remote + local).
+
+Same deny classes and reason strings as PreToolUse hooks
+(.claude/hooks/deny-env-access.py, deny-destructive-git.py), via
+scripts/lib/agent_guards. Exit 0 when allowed; exit 1 and print the
+exact deny reason on stderr when denied. Fail closed on missing args.
+
+Usage:
+  scripts/agent-guard env --command '<shell>'
+  scripts/agent-guard env --path '<path>'
+  scripts/agent-guard git --command '<shell>'
+
+Optional:
+  --root <repo>   project root for env path resolution (default: repo of this script)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(_ROOT, "scripts", "lib"))
+
+from agent_guards.env import check_env_command, check_env_tool  # noqa: E402
+from agent_guards.git import check_git_command  # noqa: E402
+
+
+def _deny_exit(deny):
+    if deny:
+        sys.stderr.write(deny.reason.rstrip() + "\n")
+        return 1
+    return 0
+
+
+def cmd_env(args):
+    root = args.root or _ROOT
+    if args.command and args.path:
+        sys.stderr.write("agent-guard env: pass only one of --command or --path\n")
+        return 2
+    if args.command:
+        return _deny_exit(check_env_command(args.command, project_root=root))
+    if args.path:
+        # Same target-field scan the Read/Edit PreToolUse path uses.
+        return _deny_exit(
+            check_env_tool(
+                "Read",
+                {"file_path": args.path},
+                project_root=root,
+                cwd=root,
+            )
+        )
+    sys.stderr.write("agent-guard env: require --command or --path\n")
+    return 2
+
+
+def cmd_git(args):
+    if not args.command:
+        sys.stderr.write("agent-guard git: require --command\n")
+        return 2
+    return _deny_exit(check_git_command(args.command))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="agent-guard",
+        description="Shared env/git deny guards for remote agents and local CLIs.",
+    )
+    root_help = "project root for env path resolution (default: this repo)"
+    parser.add_argument("--root", default=None, help=root_help)
+    sub = parser.add_subparsers(dest="surface", required=True)
+
+    env_p = sub.add_parser("env", help="deny .env / provider-key access")
+    env_p.add_argument("--root", default=None, help=root_help)
+    env_p.add_argument("--command", default=None, help="shell command string to scan")
+    env_p.add_argument("--path", default=None, help="file path to scan as a Read target")
+    env_p.set_defaults(func=cmd_env)
+
+    git_p = sub.add_parser("git", help="deny destructive git / sweep staging")
+    git_p.add_argument("--root", default=None, help=root_help)
+    git_p.add_argument("--command", default=None, help="shell command string to scan")
+    git_p.set_defaults(func=cmd_git)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
