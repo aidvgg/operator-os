@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Create pinned-ASR media evidence with semantic JSON preservation and ASCII serialization."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+import math
+import unicodedata
+
+
+_LOOP_LOADER = importlib.machinery.SourceFileLoader(
+    "scan_transcript_loops", str(pathlib.Path(__file__).resolve().with_name("scan-transcript-loops")))
+LOOPS = importlib.util.module_from_spec(importlib.util.spec_from_loader(_LOOP_LOADER.name, _LOOP_LOADER))
+_LOOP_LOADER.exec_module(LOOPS)
+
+ENGINE = "mlx-whisper==0.4.3"
+MODEL = "mlx-community/whisper-large-v3-turbo"
+DASHES = str.maketrans({chr(point): "-" for point in range(0x110000)
+                         if unicodedata.category(chr(point)) == "Pd"} | {"\u2212": "-"})
+
+
+def digest(body):
+    return hashlib.sha256(body).hexdigest()
+
+
+def digest_file(path):
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def aliases(first, second):
+    if first.exists() and second.exists() and os.path.samefile(first, second):
+        return True
+    return first.resolve(strict=False) == second.resolve(strict=False)
+
+
+def stage(destination, body):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return pathlib.Path(temporary)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def publish_pair(markdown_destination, markdown, json_destination, raw):
+    staged_markdown = None
+    staged_json = None
+    backups = {}
+    published = []
+    try:
+        staged_markdown = stage(markdown_destination, markdown)
+        staged_json = stage(json_destination, raw)
+        for destination in (json_destination, markdown_destination):
+            backups[destination] = stage(destination, destination.read_bytes()) if destination.exists() else None
+        os.replace(staged_json, json_destination)
+        published.append(json_destination)
+        os.replace(staged_markdown, markdown_destination)
+        published.append(markdown_destination)
+    except BaseException:
+        for destination in reversed(published):
+            backup = backups[destination]
+            if backup is None:
+                destination.unlink(missing_ok=True)
+            else:
+                os.replace(backup, destination)
+        raise
+    finally:
+        for path in (staged_markdown, staged_json, *backups.values()):
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+
+def timestamp(seconds):
+    milliseconds = round(float(seconds) * 1000)
+    minutes, remainder = divmod(milliseconds, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{minutes:02}:{seconds:02}.{milliseconds:03}"
+
+
+def number(value, label):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"{label} must be finite")
+    return float(value)
+
+
+def count_nonfinite_diagnostics(value):
+    if isinstance(value, dict):
+        return sum(count_nonfinite_diagnostics(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(count_nonfinite_diagnostics(item) for item in value)
+    return int(isinstance(value, float) and not math.isfinite(value))
+
+
+def validate_segments(parsed, duration):
+    segments = parsed.get("segments") if isinstance(parsed, dict) else None
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("backend JSON has no segments list")
+    records = []
+    unrenderable = []
+    counts = {
+        "backend_segment_count": len(segments),
+        "rendered_segment_count": 0,
+        "cleared_segment_count": 0,
+        "unaligned_segment_count": 0,
+        "reversed_timing_segment_count": 0,
+        "emission_order_regressions": 0,
+        "emission_overlap_count": 0,
+    }
+    previous_segment_start = 0.0
+    previous_segment_end = 0.0
+    for index, segment in enumerate(segments, start=1):
+        if not isinstance(segment, dict):
+            raise ValueError("backend JSON has an invalid segment")
+        text = segment.get("text")
+        tokens = segment.get("tokens")
+        words = segment.get("words")
+        start = number(segment.get("start"), f"segment {index} start")
+        end = number(segment.get("end"), f"segment {index} end")
+        if not (0 <= start <= duration and 0 <= end <= duration):
+            raise ValueError(f"backend JSON has invalid timestamps for segment {index}")
+        # Decoder emissions can regress or overlap, including cleared records.
+        # Preserve their raw order and disclose adjacency counts without rejecting it.
+        counts["emission_order_regressions"] += int(start < previous_segment_start)
+        counts["emission_overlap_count"] += int(start < previous_segment_end)
+        previous_segment_start, previous_segment_end = start, end
+        if start > end:
+            if not (isinstance(text, str) and text.strip()
+                    and isinstance(tokens, list) and tokens and words == []):
+                raise ValueError(f"backend JSON has invalid timestamps for segment {index}")
+            counts["reversed_timing_segment_count"] += 1
+            unrenderable.append(
+                f"- Backend index `{index - 1}`; start seconds `{segment['start']}`; "
+                f"end seconds `{segment['end']}`: {text.translate(DASHES).strip()}\n"
+            )
+            continue
+        if text == "" and tokens == [] and words == []:
+            counts["cleared_segment_count"] += 1
+            continue
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("backend JSON has an empty segment")
+        if not isinstance(tokens, list) or not tokens:
+            raise ValueError(f"backend JSON has no tokens for segment {index}")
+        if not isinstance(words, list):
+            raise ValueError(f"backend JSON has no word timestamps for segment {index}")
+        if not words:
+            counts["unaligned_segment_count"] += 1
+        word_starts = []
+        word_ends = []
+        previous_word_end = 0.0
+        for word_index, word in enumerate(words, start=1):
+            if not isinstance(word, dict) or not isinstance(word.get("word"), str) or not word["word"].strip():
+                raise ValueError(f"backend JSON has an invalid word {word_index} in segment {index}")
+            word_start = number(word.get("start"), f"word {word_index} start")
+            word_end = number(word.get("end"), f"word {word_index} end")
+            if word_start < 0 or word_end < word_start or word_end > duration or word_start < previous_word_end:
+                raise ValueError(f"backend JSON has invalid word timestamps in segment {index}")
+            previous_word_end = word_end
+            word_starts.append(word_start)
+            word_ends.append(word_end)
+        envelope_start = min(start, word_starts[0]) if words else start
+        envelope_end = max(end, word_ends[-1]) if words else end
+        line = f"[{timestamp(envelope_start)} - {timestamp(envelope_end)}] {text.translate(DASHES).strip()}\n"
+        records.append((envelope_start, envelope_end, index, line))
+    if not records and not unrenderable:
+        raise ValueError("backend JSON has no usable segments")
+    counts["rendered_segment_count"] = len(records)
+    lines = [record[3] for record in sorted(records, key=lambda record: record[:3])]
+    if unrenderable:
+        lines.extend([
+            "\n## Unrenderable backend segments\n\n",
+            "These records have reversed backend timing. No timestamp was fabricated. Backend indices are zero-based.\n\n",
+            *unrenderable,
+        ])
+    return lines, counts
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", type=pathlib.Path)
+    parser.add_argument("--output", required=True, type=pathlib.Path)
+    parser.add_argument("--json-output", required=True, type=pathlib.Path)
+    parser.add_argument("--source-label", required=True)
+    parser.add_argument("--force", action="store_true")
+    # Opt-in only: breaks decoder repetition loops. The default path stays byte-identical.
+    parser.add_argument("--no-condition-on-previous-text", action="store_true")
+    args = parser.parse_args()
+    conditioned = not args.no_condition_on_previous_text
+    if not args.input.is_file():
+        raise ValueError(f"input is not a file: {args.input}")
+    if aliases(args.input, args.output) or aliases(args.input, args.json_output):
+        raise ValueError("output aliases input")
+    if aliases(args.output, args.json_output):
+        raise ValueError("output and json-output alias each other")
+    source_label = args.source_label.translate(DASHES)
+    source_hash = digest_file(args.input)
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(args.input)],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    duration = float(probe.stdout.strip())
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("ffprobe did not report a positive duration")
+
+    with tempfile.TemporaryDirectory(prefix="transcribe-media-") as temporary:
+        temporary_path = pathlib.Path(temporary)
+        subprocess.run([
+            "uvx", "--from", ENGINE, "mlx_whisper", str(args.input),
+            "--model", MODEL, "--task", "transcribe", "--language", "en",
+            "--temperature", "0", "--word-timestamps", "True",
+            *([] if conditioned else ["--condition-on-previous-text", "False"]),
+            "--output-format", "json", "--output-dir", str(temporary_path),
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        backend_path = temporary_path / f"{args.input.stem}.json"
+        if not backend_path.is_file():
+            raise ValueError(f"backend did not create JSON: {backend_path.name}")
+        parsed = json.loads(backend_path.read_bytes())
+
+    lines, counts = validate_segments(parsed, duration)
+    # Timing values are finite after validation. Preserve remaining backend diagnostics.
+    counts["backend_nonfinite_diagnostic_count"] = count_nonfinite_diagnostics(parsed)
+    # Reported on stdout and stderr only, so evidence bytes stay identical across versions.
+    loop_body = LOOPS.covered_seconds(
+        LOOPS.loop_spans(parsed["segments"]), 0.0, max(0.0, duration - LOOPS.TAIL_SECONDS))
+    raw = json.dumps(parsed, ensure_ascii=True, separators=(",", ":"), allow_nan=True).encode("utf-8")
+
+    if digest_file(args.input) != source_hash:
+        raise ValueError("source changed during transcription")
+    count_metadata = "".join(f"- {field}: `{count}`\n" for field, count in counts.items())
+    numeric_metadata = (
+        "- Backend JSON numeric extensions: Python/MLX nonfinite numeric extensions preserved; not strict RFC JSON.\n"
+        if counts["backend_nonfinite_diagnostic_count"] else ""
+    )
+    markdown = (
+        f"# Transcript: {source_label}\n\n"
+        "Machine transcript only. Not checked against the recording. No LLM editing was applied.\n\n"
+        f"- Source SHA-256: `{source_hash}`\n"
+        f"- Duration seconds: `{duration:g}`\n"
+        f"- Engine: `{ENGINE}`\n"
+        f"- Model: `{MODEL}`\n"
+        + ("" if conditioned else
+           "- Previous-text conditioning: `False`. Opt-in loop-recovery decode; the backend default is `True`.\n")
+        + "- Backend JSON encoding: ASCII escaped JSON preserving backend data.\n"
+        "- Raw JSON order: original backend emission order.\n"
+        "- Markdown order: chronologically sorted by union start, union end, then original backend index.\n"
+        "- Unaligned segments: records without word alignment use segment-level timing.\n"
+        f"{count_metadata}"
+        f"{numeric_metadata}"
+        "- Dash normalization: Unicode dashes replaced with ASCII hyphen in Markdown only.\n\n"
+        "## Segments\n\n" + "".join(lines)
+    ).encode("utf-8")
+    existing_markdown = args.output.read_bytes() if args.output.exists() else None
+    existing_raw = args.json_output.read_bytes() if args.json_output.exists() else None
+    if not args.force and (existing_markdown not in (None, markdown) or existing_raw not in (None, raw)):
+        raise FileExistsError("output already exists and does not match")
+    if existing_raw != raw or existing_markdown != markdown:
+        publish_pair(args.output, markdown, args.json_output, raw)
+    print(json.dumps({
+        "kind": "media_transcription",
+        "source_label": source_label,
+        "source_sha256": source_hash,
+        "duration_seconds": duration,
+        "engine": ENGINE,
+        "model": MODEL,
+        "condition_on_previous_text": conditioned,
+        **counts,
+        "loop_evidence_body_seconds": loop_body,
+        "raw_json_order": "backend_emission",
+        "markdown_order": "union_start_union_end_original_index",
+        "output": str(args.output),
+        "output_sha256": digest(markdown),
+        "json_output": str(args.json_output),
+        "json_output_sha256": digest(raw),
+    }, separators=(",", ":")))
+    if loop_body >= LOOPS.TRIGGER_SECONDS:
+        advice = ("rerun with --no-condition-on-previous-text to a -loop-recovery sibling" if conditioned
+                  else "loop evidence remains in this loop-recovery decode")
+        print(f"transcribe-media: warning: {loop_body:g}s of decoder-loop evidence before the final "
+              f"{LOOPS.TAIL_SECONDS:g}s; {advice}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, subprocess.CalledProcessError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        print(f"transcribe-media: {error}", file=sys.stderr)
+        sys.exit(1)

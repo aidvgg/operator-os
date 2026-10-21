@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Black-box contract tests for scripts/extract-pdf-text.
+
+Breaks named here: skipped page, missing page marker, non-atomic failure,
+wrong source hash, and unnormalized Unicode dash.
+"""
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import tempfile
+import textwrap
+import unicodedata
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "extract-pdf-text"
+
+
+class ExtractPdfTextTests(unittest.TestCase):
+    def make_stub(self, directory, name, body):
+        path = pathlib.Path(directory) / name
+        path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_extract(self, source, output, bin_dir, *extra, label="lesson.pdf"):
+        env = os.environ.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        return subprocess.run(
+            [str(SCRIPT), str(source), "--output", str(output),
+             "--source-label", label, *extra],
+            text=True, capture_output=True, env=env, check=False,
+        )
+
+    def test_writes_literal_page_bounded_text_and_completion_metadata(self):
+        """Would fail if a page is skipped, marker omitted, hash wrong, or dash remains."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "source.pdf"
+            source.write_bytes(b"synthetic pdf bytes\n")
+            output = root / "evidence.txt"
+            self.make_stub(bins, "pdfinfo", "print('Pages:          2')\n")
+            self.make_stub(bins, "pdftotext", textwrap.dedent("""\
+                import sys
+                page = sys.argv[sys.argv.index('-f') + 1]
+                print({'1': 'first\\u2014page', '2': 'second\\u2013page'}[page])
+            """))
+
+            result = self.run_extract(source, output, bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected = (
+                b"source_label: lesson.pdf\n"
+                b"source_sha256: " + hashlib.sha256(source.read_bytes()).hexdigest().encode() + b"\n"
+                b"page_count: 2\n"
+                b"dash_normalization: unicode dashes replaced with ASCII hyphen\n\n"
+                b"===== PAGE 1 OF 2 =====\nfirst-page\n"
+                b"===== PAGE 2 OF 2 =====\nsecond-page\n"
+            )
+            self.assertEqual(output.read_bytes(), expected)
+            completion = json.loads(result.stdout)
+            self.assertEqual(completion, {
+                "kind": "pdf_text_extraction",
+                "source_label": "lesson.pdf",
+                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "page_count": 2,
+                "output": str(output),
+                "output_sha256": hashlib.sha256(expected).hexdigest(),
+            })
+
+    def test_rejects_input_output_alias_before_running_poppler(self):
+        """Would fail if --force lets extraction overwrite its source through an alias."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "source.pdf"
+            source.write_bytes(b"pdf")
+            output = root / "source-alias.txt"
+            os.link(source, output)
+            calls = root / "calls"
+            self.make_stub(bins, "pdfinfo", f"open({str(calls)!r}, 'w').write('called')\nprint('Pages: 1')\n")
+            self.make_stub(bins, "pdftotext", "print('page')\n")
+
+            result = self.run_extract(source, output, bins, "--force")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("aliases input", result.stderr)
+            self.assertFalse(calls.exists())
+            self.assertEqual(source.read_bytes(), b"pdf")
+
+    def test_source_mutation_during_poppler_work_fails_before_publication(self):
+        """Would fail if the source is hashed after extraction or changes are published."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source, output = root / "source.pdf", root / "evidence.txt"
+            source.write_bytes(b"before")
+            self.make_stub(bins, "pdfinfo", "print('Pages: 1')\n")
+            self.make_stub(bins, "pdftotext", textwrap.dedent(f"""\
+                import pathlib
+                pathlib.Path({str(source)!r}).write_bytes(b'after')
+                print('page')
+            """))
+
+            result = self.run_extract(source, output, bins)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source changed", result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_normalizes_all_unicode_dash_punctuation_and_minus(self):
+        """Would fail if any Pd dash, including FE58 or FF0D, reaches evidence bytes."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source, output = root / "source.pdf", root / "evidence.txt"
+            source.write_bytes(b"pdf")
+            dashes = "".join(chr(point) for point in range(0x110000)
+                              if unicodedata.category(chr(point)) == "Pd") + "\u2212"
+            self.make_stub(bins, "pdfinfo", "print('Pages: 1')\n")
+            self.make_stub(bins, "pdftotext", f"print({('a' + dashes + 'b')!r})\n")
+
+            result = self.run_extract(source, output, bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b"a" + b"-" * len(dashes.encode("utf-8").decode("utf-8")) + b"b", output.read_bytes())
+
+    def test_normalizes_unicode_dashes_in_persisted_source_label(self):
+        """Would fail if source-label metadata retains Pd or U+2212 characters."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source, output = root / "source.pdf", root / "evidence.txt"
+            source.write_bytes(b"pdf")
+            self.make_stub(bins, "pdfinfo", "print('Pages: 1')\n")
+            self.make_stub(bins, "pdftotext", "print('page')\n")
+
+            result = self.run_extract(source, output, bins, label="lesson\uFE58\uFF0D\u2212.pdf")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(output.read_bytes().startswith(b"source_label: lesson---.pdf\n"))
+            self.assertEqual(json.loads(result.stdout)["source_label"], "lesson---.pdf")
+
+    def test_empty_page_fails_without_replacing_existing_destination(self):
+        """Would fail if an empty page leaves a partial destination or replaces evidence."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "source.pdf"
+            source.write_bytes(b"pdf")
+            output = root / "evidence.txt"
+            output.write_bytes(b"old evidence")
+            self.make_stub(bins, "pdfinfo", "print('Pages: 2')\n")
+            self.make_stub(bins, "pdftotext", textwrap.dedent("""\
+                import sys
+                if sys.argv[sys.argv.index('-f') + 1] == '1': print('present')
+            """))
+
+            result = self.run_extract(source, output, bins, "--force")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("page 2 produced no text", result.stderr)
+            self.assertEqual(output.read_bytes(), b"old evidence")
+            self.assertEqual(list(root.glob(".evidence.txt.*")), [])
+
+    def test_refuses_existing_output_unless_forced(self):
+        """Would fail if an existing evidence destination is silently overwritten."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "source.pdf"
+            source.write_bytes(b"pdf")
+            output = root / "evidence.txt"
+            output.write_bytes(b"existing")
+            self.make_stub(bins, "pdfinfo", "print('Pages: 1')\n")
+            self.make_stub(bins, "pdftotext", "print('page')\n")
+
+            result = self.run_extract(source, output, bins)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("already exists", result.stderr)
+            self.assertEqual(output.read_bytes(), b"existing")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

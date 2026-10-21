@@ -1,0 +1,867 @@
+#!/usr/bin/env python3
+"""Black-box contract tests for scripts/transcribe-media.
+
+Breaks named here: wrong pinned backend arguments, altered raw JSON, wrong
+source hash, missing provenance/timestamps, non-atomic failure, and empty
+states accepted as evidence.
+"""
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+import pathlib
+import subprocess
+import tempfile
+import textwrap
+import unittest
+import unicodedata
+from unittest import mock
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "transcribe-media"
+
+
+class TranscribeMediaTests(unittest.TestCase):
+    def make_stub(self, directory, name, body):
+        path = pathlib.Path(directory) / name
+        path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_transcribe(self, source, markdown, raw, bin_dir, *extra, label="clip.mp4"):
+        env = os.environ.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        return subprocess.run(
+            [str(SCRIPT), str(source), "--output", str(markdown),
+             "--json-output", str(raw), "--source-label", label, *extra],
+            text=True, capture_output=True, env=env, check=False,
+        )
+
+    def install_success_backend(self, bins, fixture, argv_file=None, mutation=None):
+        record = ""
+        if argv_file:
+            record = f"pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))"
+        mutate = ""
+        if mutation:
+            mutate = f"pathlib.Path({str(mutation)!r}).write_bytes(b'changed')"
+        self.make_stub(bins, "uvx", textwrap.dedent(f"""\
+            import json, pathlib, sys
+            {record}
+            {mutate}
+            out = pathlib.Path(sys.argv[sys.argv.index('--output-dir') + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / 'clip.json').write_bytes({fixture!r})
+        """))
+
+    def test_preserves_raw_json_and_writes_timestamped_machine_only_markdown(self):
+        """Would fail if ASR args, raw JSON, source hash, timestamps, or warning change."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"synthetic media")
+            markdown, raw = root / "clip.md", root / "clip.json"
+            argv_file = root / "uvx-argv.json"
+            fixture = '{\n  "segments": [{"start": 0.0, "end": 1.25, "text": "hello\u2014world", "tokens": [100], "words": [{"start": 0.0, "end": 1.25, "word": "hello\u2014world"}]}]\n}\n'.encode()
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.make_stub(bins, "uvx", textwrap.dedent(f"""\
+                import json, pathlib, sys
+                pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))
+                out = pathlib.Path(sys.argv[sys.argv.index('--output-dir') + 1])
+                out.mkdir(parents=True, exist_ok=True)
+                (out / 'clip.json').write_bytes({fixture!r})
+            """))
+
+            result = self.run_transcribe(source, markdown, raw, bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = json.loads(argv_file.read_text())
+            self.assertEqual(argv[:-1], [
+                "--from", "mlx-whisper==0.4.3", "mlx_whisper", str(source),
+                "--model", "mlx-community/whisper-large-v3-turbo", "--task", "transcribe",
+                "--language", "en", "--temperature", "0", "--word-timestamps",
+                "True", "--output-format", "json", "--output-dir",
+            ])
+            self.assertTrue(argv[-1])
+            expected_raw = json.dumps(json.loads(fixture), ensure_ascii=True, separators=(",", ":")).encode()
+            self.assertEqual(raw.read_bytes(), expected_raw)
+            self.assertEqual(json.loads(raw.read_bytes()), json.loads(fixture))
+            self.assertIn(b"\\u2014", raw.read_bytes())
+            expected_markdown = (
+                "# Transcript: clip.mp4\n\n"
+                "Machine transcript only. Not checked against the recording. No LLM editing was applied.\n\n"
+                f"- Source SHA-256: `{hashlib.sha256(source.read_bytes()).hexdigest()}`\n"
+                "- Duration seconds: `12.5`\n"
+                "- Engine: `mlx-whisper==0.4.3`\n"
+                "- Model: `mlx-community/whisper-large-v3-turbo`\n"
+                "- Backend JSON encoding: ASCII escaped JSON preserving backend data.\n"
+                "- Raw JSON order: original backend emission order.\n"
+                "- Markdown order: chronologically sorted by union start, union end, then original backend index.\n"
+                "- Unaligned segments: records without word alignment use segment-level timing.\n"
+                "- backend_segment_count: `1`\n"
+                "- rendered_segment_count: `1`\n"
+                "- cleared_segment_count: `0`\n"
+                "- unaligned_segment_count: `0`\n"
+                "- reversed_timing_segment_count: `0`\n"
+                "- emission_order_regressions: `0`\n"
+                "- emission_overlap_count: `0`\n"
+                "- backend_nonfinite_diagnostic_count: `0`\n"
+                "- Dash normalization: Unicode dashes replaced with ASCII hyphen in Markdown only.\n\n"
+                "## Segments\n\n"
+                "[00:00.000 - 00:01.250] hello-world\n"
+            ).encode()
+            self.assertEqual(markdown.read_bytes(), expected_markdown)
+            completion = json.loads(result.stdout)
+            self.assertEqual(completion["kind"], "media_transcription")
+            self.assertEqual(completion["source_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertEqual(completion["duration_seconds"], 12.5)
+            self.assertEqual(completion["json_output_sha256"], hashlib.sha256(expected_raw).hexdigest())
+            self.assertEqual(completion["output_sha256"], hashlib.sha256(expected_markdown).hexdigest())
+
+    def test_opt_in_unconditioned_decode_passes_flag_and_discloses_it(self):
+        """Would fail if loop-recovery decoding is silent, mispositioned, or leaks into the default."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"synthetic media")
+            markdown, raw = root / "clip.md", root / "clip.json"
+            argv_file = root / "uvx-argv.json"
+            fixture = b'{"segments":[{"start":0,"end":1,"text":"ok","tokens":[100],"words":[{"start":0,"end":1,"word":"ok"}]}]}'
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.install_success_backend(bins, fixture, argv_file=argv_file)
+
+            result = self.run_transcribe(source, markdown, raw, bins, "--no-condition-on-previous-text")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = json.loads(argv_file.read_text())
+            self.assertEqual(argv[:-1], [
+                "--from", "mlx-whisper==0.4.3", "mlx_whisper", str(source),
+                "--model", "mlx-community/whisper-large-v3-turbo", "--task", "transcribe",
+                "--language", "en", "--temperature", "0", "--word-timestamps",
+                "True", "--condition-on-previous-text", "False",
+                "--output-format", "json", "--output-dir",
+            ])
+            text = markdown.read_text()
+            self.assertIn(
+                "- Model: `mlx-community/whisper-large-v3-turbo`\n"
+                "- Previous-text conditioning: `False`. Opt-in loop-recovery decode; the backend default is `True`.\n"
+                "- Backend JSON encoding:",
+                text,
+            )
+            completion = json.loads(result.stdout)
+            self.assertIs(completion["condition_on_previous_text"], False)
+
+            default_markdown, default_raw = root / "default.md", root / "default.json"
+            default_result = self.run_transcribe(source, default_markdown, default_raw, bins)
+
+            self.assertEqual(default_result.returncode, 0, default_result.stderr)
+            self.assertNotIn("--condition-on-previous-text", json.loads(argv_file.read_text()))
+            self.assertNotIn("Previous-text conditioning", default_markdown.read_text())
+            self.assertIs(json.loads(default_result.stdout)["condition_on_previous_text"], True)
+
+    def test_reports_loop_evidence_and_recovery_hint_without_changing_evidence(self):
+        """Would fail if a mid-recording decoder loop is transcribed silently or the hint leaks into evidence."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('400')\n")
+            speech = [{"start": i * 5.0, "end": i * 5.0 + 5.0, "text": f" sentence {i}", "tokens": [100],
+                       "words": [{"start": i * 5.0, "end": i * 5.0 + 5.0, "word": f" sentence {i}"}]}
+                      for i in range(20)]
+            loop = [{"start": 100 + i * 2.0, "end": 101 + i * 2.0, "text": " Save.", "tokens": [100],
+                     "words": [{"start": 100 + i * 2.0, "end": 101 + i * 2.0, "word": " Save."}]}
+                    for i in range(10)]
+            self.install_success_backend(bins, json.dumps({"segments": speech + loop}).encode())
+
+            looped = self.run_transcribe(source, root / "loop.md", root / "loop.json", bins)
+            recovery = self.run_transcribe(source, root / "rec.md", root / "rec.json", bins,
+                                           "--no-condition-on-previous-text")
+            self.install_success_backend(bins, json.dumps({"segments": speech}).encode())
+            clean = self.run_transcribe(source, root / "clean.md", root / "clean.json", bins)
+
+            self.assertEqual(looped.returncode, 0, looped.stderr)
+            self.assertEqual(json.loads(looped.stdout)["loop_evidence_body_seconds"], 19.0)
+            self.assertIn("rerun with --no-condition-on-previous-text", looped.stderr)
+            self.assertNotIn("loop", (root / "loop.md").read_text().lower())
+            self.assertEqual(recovery.returncode, 0, recovery.stderr)
+            self.assertIn("loop evidence remains", recovery.stderr)
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+            self.assertEqual(json.loads(clean.stdout)["loop_evidence_body_seconds"], 0.0)
+            self.assertEqual(clean.stderr, "")
+
+    def test_backend_failure_leaves_no_partial_destinations(self):
+        """Would fail if a backend error creates either final output or temp debris."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            markdown, raw = root / "clip.md", root / "clip.json"
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.make_stub(bins, "uvx", "raise SystemExit(17)\n")
+
+            result = self.run_transcribe(source, markdown, raw, bins)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(markdown.exists())
+            self.assertFalse(raw.exists())
+            self.assertEqual(list(root.glob(".clip.*")), [])
+
+    def test_rejects_empty_segments_without_replacing_existing_outputs(self):
+        """Would fail if an empty transcript is accepted as source evidence."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            markdown, raw = root / "clip.md", root / "clip.json"
+            markdown.write_bytes(b"old markdown")
+            raw.write_bytes(b"old json")
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.make_stub(bins, "uvx", textwrap.dedent("""\
+                import pathlib, sys
+                out = pathlib.Path(sys.argv[sys.argv.index('--output-dir') + 1])
+                out.mkdir(parents=True, exist_ok=True)
+                (out / 'clip.json').write_text('{"segments": []}')
+            """))
+
+            result = self.run_transcribe(source, markdown, raw, bins, "--force")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no segments list", result.stderr)
+            self.assertEqual(markdown.read_bytes(), b"old markdown")
+            self.assertEqual(raw.read_bytes(), b"old json")
+
+    def test_rejects_input_and_output_aliases_before_running_backend(self):
+        """Would fail if --force permits source, Markdown, or JSON alias collisions."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            raw = root / "raw.json"
+            os.link(source, raw)
+            calls = root / "calls"
+            self.make_stub(bins, "ffprobe", f"open({str(calls)!r}, 'w').write('called')\nprint('12.5')\n")
+            self.make_stub(bins, "uvx", "raise SystemExit(99)\n")
+
+            result = self.run_transcribe(source, root / "clip.md", raw, bins, "--force")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("aliases input", result.stderr)
+            self.assertFalse(calls.exists())
+
+    def test_rejects_markdown_json_alias_before_running_backend(self):
+        """Would fail if two transcript representations can overwrite each other."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source, shared = root / "clip.mp4", root / "shared-output"
+            source.write_bytes(b"media")
+            calls = root / "calls"
+            self.make_stub(bins, "ffprobe", f"open({str(calls)!r}, 'w').write('called')\nprint('12.5')\n")
+            self.make_stub(bins, "uvx", "raise SystemExit(99)\n")
+
+            result = self.run_transcribe(source, shared, shared, bins, "--force")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("alias each other", result.stderr)
+            self.assertFalse(calls.exists())
+
+    def test_source_mutation_fails_before_any_publication(self):
+        """Would fail if media is hashed after ffprobe or backend processing."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"original")
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.install_success_backend(bins, b'{"segments":[{"start":0,"end":1,"text":"ok", "tokens": [100],"words":[{"start":0,"end":1,"word":"ok"}]}]}', mutation=source)
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("source changed", result.stderr)
+            self.assertFalse((root / "clip.md").exists())
+            self.assertFalse((root / "clip.json").exists())
+
+    def test_rejects_invalid_duration_segments_and_word_timestamps(self):
+        """Would fail if malformed ASR timing evidence is committed as a transcript."""
+        cases = {
+            "non-finite duration": ("nan", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": "ok"}]}]}),
+            "empty segment": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "", "words": [{"start": 0, "end": 1, "word": "ok"}]}]}),
+            "whitespace segment": ("12.5", {"segments": [{"start": 0, "end": 1, "text": " ", "tokens": [], "words": []}]}),
+            "empty segment missing tokens": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "", "words": []}]}),
+            "empty segment missing words": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "", "tokens": []}]}),
+            "empty segment with tokens": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "", "tokens": [50364], "words": []}]}),
+            "empty segment with words": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "", "tokens": [], "words": [{"start": 0, "end": 1, "word": "ok"}]}]}),
+            "reversed segment": ("12.5", {"segments": [{"start": 2, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 1, "end": 2, "word": "ok"}]}]}),
+            "reversed cleared segment": ("12.5", {"segments": [{"start": 2, "end": 1, "text": "", "tokens": [], "words": []}]}),
+            "out of duration": ("12.5", {"segments": [{"start": 0, "end": 13, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": "ok"}]}]}),
+            "cleared segment out of duration": ("12.5", {"segments": [{"start": 13, "end": 13, "text": "", "tokens": [], "words": []}]}),
+            "invalid segment object": ("12.5", {"segments": [None]}),
+            "non-string segment text": ("12.5", {"segments": [{"start": 0, "end": 1, "text": 42, "words": []}]}),
+            "negative segment": ("12.5", {"segments": [{"start": -1, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": "ok"}]}]}),
+            "negative cleared segment": ("12.5", {"segments": [{"start": -1, "end": 0, "text": "", "tokens": [], "words": []}]}),
+            "non-finite segment": ("12.5", {"segments": [{"start": float("nan"), "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": "ok"}]}]}),
+            "non-finite cleared segment": ("12.5", {"segments": [{"start": 0, "end": float("inf"), "text": "", "tokens": [], "words": []}]}),
+            "absent words": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100]}]}),
+            "words is not a list": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": None}]}),
+            "word out of duration": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 13, "word": "ok"}]}]}),
+            "within segment word overlap": ("12.5", {"segments": [{"start": 0, "end": 2, "text": "one two", "tokens": [100], "words": [{"start": 0, "end": 1.1, "word": "one"}, {"start": 1, "end": 2, "word": "two"}]}]}),
+            "within segment word regression": ("12.5", {"segments": [{"start": 0, "end": 2, "text": "one two", "tokens": [100], "words": [{"start": 1, "end": 2, "word": "one"}, {"start": 0, "end": 1, "word": "two"}]}]}),
+            "negative word": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": -1, "end": 1, "word": "ok"}]}]}),
+            "reversed word": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 1, "end": 0, "word": "ok"}]}]}),
+            "non-finite word start": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": float("nan"), "end": 1, "word": "ok"}]}]}),
+            "non-finite word end": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": float("inf"), "word": "ok"}]}]}),
+            "invalid word object": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [None]}]}),
+            "non-string word": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": 42}]}]}),
+            "whitespace word": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": " "}]}]}),
+            "empty word": ("12.5", {"segments": [{"start": 0, "end": 1, "text": "ok", "tokens": [100], "words": [{"start": 0, "end": 1, "word": ""}]}]}),
+        }
+        for name, (duration, payload) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                bins = root / "bin"
+                bins.mkdir()
+                source = root / "clip.mp4"
+                source.write_bytes(b"media")
+                self.make_stub(bins, "ffprobe", f"print({duration!r})\n")
+                self.install_success_backend(bins, json.dumps(payload).encode())
+                result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / "clip.md").exists())
+                self.assertFalse((root / "clip.json").exists())
+
+    def test_preserves_backend_emission_order_and_sorts_markdown_union_bounds(self):
+        """Catches global-order rejection, raw reordering, wrong sort keys or counts."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('1800')\n")
+            # Fixture records 526 through 529 reproduce the cleared topology.
+            fixture = {"segments": [
+                {"id": 526, "seek": 172960, "start": 1757.8, "end": 1757.8,
+                 "text": "", "tokens": [], "words": []},
+                {"id": 527, "seek": 172960, "start": 1757.8, "end": 1757.8,
+                 "text": "", "tokens": [], "words": []},
+                {"id": 528, "seek": 172960, "start": 1754.6, "end": 1754.6,
+                 "text": "", "tokens": [], "words": []},
+                {"id": 529, "seek": 175780, "start": 1757.8, "end": 1758.5,
+                 "text": " Save.", "tokens": [50365, 15541, 13, 50415], "words": [
+                     {"word": " Save.", "start": 1757.8, "end": 1758.5,
+                      "probability": 7.152557373046875e-7}]},
+                {"start": 1756, "end": 1758, "text": " zeta\u2014first tie", "tokens": [100], "words": [
+                    {"start": 1755.8, "end": 1758.2, "word": " zeta\u2014first tie"}]},
+                {"start": 1756, "end": 1758, "text": " alpha second tie", "tokens": [100], "words": [
+                    {"start": 1755.8, "end": 1758.2, "word": " alpha second tie"}]},
+                {"start": 1756.2, "end": 1757, "text": " shorter union", "tokens": [100], "words": [
+                    {"start": 1755.8, "end": 1757, "word": " shorter union"}]},
+                {"start": 1757, "end": 1759, "text": " earliest union", "tokens": [100], "words": [
+                    {"start": 1755.6, "end": 1759, "word": " earliest union"}]},
+            ]}
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw = (root / "clip.json").read_bytes()
+            self.assertEqual(raw, json.dumps(fixture, ensure_ascii=True, separators=(",", ":")).encode())
+            self.assertEqual(json.loads(raw), fixture)
+            markdown = (root / "clip.md").read_text()
+            self.assertEqual([line for line in markdown.splitlines() if line.startswith("[")], [
+                "[29:15.600 - 29:19.000] earliest union",
+                "[29:15.800 - 29:17.000] shorter union",
+                "[29:15.800 - 29:18.200] zeta-first tie",
+                "[29:15.800 - 29:18.200] alpha second tie",
+                "[29:17.800 - 29:18.500] Save.",
+            ])
+            completion = json.loads(result.stdout)
+            for field, count in {
+                "backend_segment_count": 8,
+                "rendered_segment_count": 5,
+                "cleared_segment_count": 3,
+                "unaligned_segment_count": 0,
+                "emission_order_regressions": 2,
+                "emission_overlap_count": 4,
+            }.items():
+                self.assertEqual(completion[field], count)
+                self.assertIn(f"- {field}: `{count}`\n", markdown)
+            self.assertIn("Raw JSON order: original backend emission order.", markdown)
+            self.assertIn("Markdown order: chronologically sorted by union start, union end, then original backend index.", markdown)
+            self.assertEqual(completion["raw_json_order"], "backend_emission")
+            self.assertEqual(completion["markdown_order"], "union_start_union_end_original_index")
+
+    def test_accepts_independent_cross_segment_word_alignment(self):
+        """Catches global word-order rejection even when raw segments are disjoint."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            fixture = {"segments": [
+                {"start": 0, "end": 1, "text": "one", "tokens": [100], "words": [
+                    {"start": 0, "end": 1.1, "word": "one"}]},
+                {"start": 1.1, "end": 2, "text": "two", "tokens": [100], "words": [
+                    {"start": 1, "end": 1.5, "word": "two"}]},
+            ]}
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads((root / "clip.json").read_bytes()), fixture)
+            self.assertTrue((root / "clip.md").read_text().endswith(
+                "[00:00.000 - 00:01.100] one\n[00:01.000 - 00:02.000] two\n"))
+            completion = json.loads(result.stdout)
+            self.assertEqual(completion["emission_order_regressions"], 0)
+            self.assertEqual(completion["emission_overlap_count"], 0)
+
+    def test_preserves_exact_unaligned_record_and_renders_segment_timing(self):
+        """Catches rejecting or omitting backend text whose word alignment is empty."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('2542.241655')\n")
+            fixture = {"segments": [{
+                "id": 1989,
+                "seek": 251582,
+                "start": 2516.82,
+                "end": 2517.82,
+                "text": " Save.",
+                "tokens": [50415, 15541, 13, 50465],
+                "temperature": 0.0,
+                "avg_logprob": float("nan"),
+                "compression_ratio": 4.7368421052631575,
+                "no_speech_prob": 3.7178850276209374e-11,
+                "words": [],
+            }]}
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "clip.json").read_bytes(),
+                             json.dumps(fixture, ensure_ascii=True, separators=(",", ":")).encode())
+            markdown = (root / "clip.md").read_text()
+            self.assertEqual([line for line in markdown.splitlines() if line.startswith("[")], [
+                "[41:56.820 - 41:57.820] Save.",
+            ])
+            self.assertIn("Unaligned segments: records without word alignment use segment-level timing.", markdown)
+            completion = json.loads(result.stdout)
+            for field, count in {
+                "backend_segment_count": 1,
+                "rendered_segment_count": 1,
+                "cleared_segment_count": 0,
+                "unaligned_segment_count": 1,
+                "emission_order_regressions": 0,
+                "emission_overlap_count": 0,
+                "backend_nonfinite_diagnostic_count": 1,
+            }.items():
+                self.assertEqual(completion[field], count)
+                self.assertIn(f"- {field}: `{count}`\n", markdown)
+
+    def test_preserves_nonfinite_backend_diagnostics_with_explicit_provenance(self):
+        """Catches lossy NaN conversion, nonrecursive counts, or undisclosed extensions."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('2542.241655')\n")
+            fixture = {
+                # Fixture segment 1988 retains its NaN diagnostic value.
+                "segments": [{
+                    "id": 1988, "seek": 251582, "start": 2524.18, "end": 2525.46,
+                    "text": " Save.", "tokens": [50415, 15541, 13, 50415],
+                    "temperature": 0.0, "avg_logprob": float("nan"),
+                    "compression_ratio": 4.7368421052631575,
+                    "no_speech_prob": 3.7178850276209374e-11,
+                    "words": [{"word": " Save.", "start": 2524.18, "end": 2525.46,
+                               "probability": 0.97900390625}],
+                }],
+                # Synthetic nested diagnostics exercise both recursive container paths.
+                "diagnostics": {"nested": [float("inf"), {"value": -float("inf")}],
+                                "finite": 0.0, "missing": None},
+            }
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw = (root / "clip.json").read_bytes()
+            self.assertEqual(raw, json.dumps(fixture, ensure_ascii=True, allow_nan=True,
+                                            separators=(",", ":")).encode())
+            self.assertTrue(raw.isascii())
+            decoded = json.loads(raw)
+            self.assertTrue(math.isnan(decoded["segments"][0]["avg_logprob"]))
+            self.assertEqual(decoded["diagnostics"]["nested"], [float("inf"), {"value": -float("inf")}])
+            markdown = (root / "clip.md").read_text()
+            self.assertIn("- backend_nonfinite_diagnostic_count: `3`\n", markdown)
+            self.assertIn("- Backend JSON numeric extensions: Python/MLX nonfinite numeric extensions preserved; not strict RFC JSON.\n", markdown)
+            self.assertTrue(markdown.endswith("[42:04.180 - 42:05.460] Save.\n"))
+            self.assertEqual(json.loads(result.stdout)["backend_nonfinite_diagnostic_count"], 3)
+
+    def test_rejects_nonempty_segments_without_token_evidence(self):
+        """Catches accepting aligned or unaligned text with absent or empty tokens."""
+        token_fields = [{}, {"tokens": []}, {"tokens": None}, {"tokens": "token"}]
+        for fields in token_fields:
+            for words in ([], [{"start": 0, "end": 1, "word": "ok"}]):
+                with self.subTest(tokens=fields, words=words), tempfile.TemporaryDirectory() as temp:
+                    root = pathlib.Path(temp)
+                    bins = root / "bin"
+                    bins.mkdir()
+                    source = root / "clip.mp4"
+                    source.write_bytes(b"media")
+                    self.make_stub(bins, "ffprobe", "print('12.5')\n")
+                    fixture = {"segments": [{"start": 0, "end": 1, "text": "ok",
+                                             "words": words, **fields}]}
+                    self.install_success_backend(bins, json.dumps(fixture).encode())
+
+                    result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse((root / "clip.md").exists())
+                    self.assertFalse((root / "clip.json").exists())
+
+    def test_preserves_exact_reversed_backend_records_as_unrenderable_text(self):
+        """Catches dropped source text, fabricated timing, or incorrect anomaly counts."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('2247.633333')\n")
+            # Exact Launch records 1268 through 1272, in original backend order.
+            fixture = {"segments": [
+                {"id": 1268, "seek": 223488, "start": 2239.98, "end": 2239.98,
+                 "text": "", "tokens": [], "temperature": 0.0, "avg_logprob": float("nan"),
+                 "compression_ratio": 4.706896551724138,
+                 "no_speech_prob": 4.280576934578839e-11, "words": []},
+                {"id": 1269, "seek": 223488, "start": 2239.98, "end": 2241.98,
+                 "text": "!", "tokens": [50620, 0, 50720], "temperature": 0.0,
+                 "avg_logprob": float("nan"), "compression_ratio": 4.706896551724138,
+                 "no_speech_prob": 4.280576934578839e-11, "words": []},
+                {"id": 1270, "seek": 223488, "start": 2241.98, "end": 2239.98,
+                 "text": "!", "tokens": [50720, 0, 50620], "temperature": 0.0,
+                 "avg_logprob": float("nan"), "compression_ratio": 4.706896551724138,
+                 "no_speech_prob": 4.280576934578839e-11, "words": []},
+                {"id": 1271, "seek": 223488, "start": 2239.98, "end": 2241.98,
+                 "text": "!", "tokens": [50620, 0, 50720], "temperature": 0.0,
+                 "avg_logprob": float("nan"), "compression_ratio": 4.706896551724138,
+                 "no_speech_prob": 4.280576934578839e-11, "words": []},
+                {"id": 1272, "seek": 223488, "start": 2241.98, "end": 2239.98,
+                 "text": "!", "tokens": [50720, 0, 50620], "temperature": 0.0,
+                 "avg_logprob": float("nan"), "compression_ratio": 4.706896551724138,
+                 "no_speech_prob": 4.280576934578839e-11, "words": []},
+            ]}
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "clip.json").read_bytes(),
+                             json.dumps(fixture, ensure_ascii=True, allow_nan=True,
+                                        separators=(",", ":")).encode())
+            markdown = (root / "clip.md").read_text()
+            self.assertEqual([line for line in markdown.splitlines() if line.startswith("[")], [
+                "[37:19.980 - 37:21.980] !",
+                "[37:19.980 - 37:21.980] !",
+            ])
+            self.assertTrue(markdown.endswith(
+                "\n## Unrenderable backend segments\n\n"
+                "These records have reversed backend timing. No timestamp was fabricated. Backend indices are zero-based.\n\n"
+                "- Backend index `2`; start seconds `2241.98`; end seconds `2239.98`: !\n"
+                "- Backend index `4`; start seconds `2241.98`; end seconds `2239.98`: !\n"
+            ))
+            completion = json.loads(result.stdout)
+            for field, count in {
+                "backend_segment_count": 5,
+                "rendered_segment_count": 2,
+                "cleared_segment_count": 1,
+                "unaligned_segment_count": 2,
+                "reversed_timing_segment_count": 2,
+                "emission_order_regressions": 1,
+                "emission_overlap_count": 0,
+                "backend_nonfinite_diagnostic_count": 5,
+            }.items():
+                self.assertEqual(completion[field], count)
+                self.assertIn(f"- {field}: `{count}`\n", markdown)
+
+    def test_preserves_anomaly_only_result_without_fabricating_rendered_rows(self):
+        """Catches dropping all source text when every usable record has reversed timing."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            fixture = {"segments": [{"start": 2, "end": 1, "text": " text\u2014kept",
+                                     "tokens": [100], "words": []}]}
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads((root / "clip.json").read_bytes()), fixture)
+            markdown = (root / "clip.md").read_text()
+            self.assertFalse(any(line.startswith("[") for line in markdown.splitlines()))
+            self.assertIn("- Backend index `0`; start seconds `2`; end seconds `1`: text-kept\n", markdown)
+            completion = json.loads(result.stdout)
+            self.assertEqual(completion["rendered_segment_count"], 0)
+            self.assertEqual(completion["unaligned_segment_count"], 0)
+            self.assertEqual(completion["reversed_timing_segment_count"], 1)
+
+    def test_rejects_unsupported_reversed_segment_states(self):
+        """Catches reversed timing bypassing endpoint, text, token, or word validation."""
+        variants = {
+            "negative start and end": {"start": -1, "end": -2},
+            "negative end": {"end": -1},
+            "out of duration start": {"start": 13},
+            "nonfinite start": {"start": float("nan")},
+            "nonfinite end": {"end": -float("inf")},
+            "empty text": {"text": ""},
+            "whitespace text": {"text": " "},
+            "non-string text": {"text": None},
+            "missing tokens": {"tokens": None},
+            "empty tokens": {"tokens": []},
+            "non-list tokens": {"tokens": "token"},
+            "words present": {"words": [{"start": 1, "end": 2, "word": "!"}]},
+            "missing words": {"words": None},
+        }
+        for name, changes in variants.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                bins = root / "bin"
+                bins.mkdir()
+                source = root / "clip.mp4"
+                source.write_bytes(b"media")
+                self.make_stub(bins, "ffprobe", "print('12.5')\n")
+                segment = {"start": 2, "end": 1, "text": "!", "tokens": [100], "words": []}
+                segment.update(changes)
+                for field in ("tokens", "words"):
+                    if changes.get(field, "present") is None:
+                        segment.pop(field)
+                self.install_success_backend(bins, json.dumps({"segments": [segment]}).encode())
+
+                result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / "clip.md").exists())
+                self.assertFalse((root / "clip.json").exists())
+
+    def test_rejects_result_with_only_canonical_cleared_segments(self):
+        """Would fail if cleared backend records count as usable transcript evidence."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('300')\n")
+            fixture = {"segments": [{
+                "id": 57,
+                "seek": 24352,
+                "start": 243.52,
+                "end": 243.52,
+                "text": "",
+                "tokens": [],
+                "words": [],
+            }]}
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no usable segments", result.stderr)
+            self.assertFalse((root / "clip.md").exists())
+            self.assertFalse((root / "clip.json").exists())
+
+    def test_accepts_backend_boundary_spill_and_renders_union_envelope(self):
+        """Would fail if valid MLX word alignment must fit its segment envelope."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('1000')\n")
+            fixture = {
+                "segments": [
+                    {"start": 945.96, "end": 951.26, "text": " every single day", "tokens": [100], "words": [
+                        {"start": 945.96, "end": 946.32, "word": " every"},
+                        {"start": 951.16, "end": 951.34, "word": " hey,"},
+                    ]},
+                    {"start": 951.34, "end": 955.26, "text": " next segment", "tokens": [100], "words": [
+                        {"start": 951.34, "end": 955.26, "word": " next segment"},
+                    ]},
+                ]
+            }
+            self.install_success_backend(bins, json.dumps(fixture).encode())
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b"[15:45.960 - 15:51.340] every single day\n", (root / "clip.md").read_bytes())
+
+    def test_preserves_and_skips_exact_canonical_cleared_segment(self):
+        """Would fail if MLX's canonical cleared record is rejected or rendered."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('300')\n")
+            cleared = {
+                "id": 57,
+                "seek": 24352,
+                "start": 243.52,
+                "end": 243.52,
+                "text": "",
+                "tokens": [],
+                "words": [],
+            }
+            fixture = {
+                "segments": [
+                    {"start": 242.9, "end": 243.3, "text": " before", "tokens": [100], "words": [
+                        {"start": 242.9, "end": 243.3, "word": " before"},
+                    ]},
+                    cleared,
+                    {"start": 243.52, "end": 244.0, "text": " after", "tokens": [100], "words": [
+                        {"start": 243.4, "end": 244.0, "word": " after"},
+                    ]},
+                ]
+            }
+            fixture_bytes = json.dumps(fixture).encode()
+            self.install_success_backend(bins, fixture_bytes)
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected_raw = json.dumps(fixture, ensure_ascii=True, separators=(",", ":")).encode()
+            self.assertEqual((root / "clip.json").read_bytes(), expected_raw)
+            self.assertEqual(json.loads(expected_raw)["segments"][1], cleared)
+            segment_lines = [
+                line for line in (root / "clip.md").read_text().splitlines()
+                if line.startswith("[")
+            ]
+            self.assertEqual(segment_lines, [
+                "[04:02.900 - 04:03.300] before",
+                "[04:03.400 - 04:04.000] after",
+            ])
+
+    def test_second_destination_failure_rolls_back_forced_replacements(self):
+        """Would fail if JSON is published when Markdown replacement later fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            markdown, raw = root / "clip.md", root / "clip.json"
+            markdown.write_bytes(b"old markdown")
+            raw.write_bytes(b"old raw")
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.install_success_backend(bins, b'{"segments":[{"start":0,"end":1,"text":"ok", "tokens": [100],"words":[{"start":0,"end":1,"word":"ok"}]}]}')
+            loader = importlib.machinery.SourceFileLoader("transcribe_media_test", str(SCRIPT))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            original_replace = module.os.replace
+
+            def fail_markdown_replace(source_path, destination_path):
+                if pathlib.Path(destination_path) == markdown:
+                    raise OSError("injected second destination failure")
+                return original_replace(source_path, destination_path)
+
+            env = os.environ.copy()
+            env["PATH"] = str(bins) + os.pathsep + env["PATH"]
+            argv = [str(SCRIPT), str(source), "--output", str(markdown), "--json-output", str(raw), "--source-label", "clip.mp4", "--force"]
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.argv", argv), mock.patch.object(module.os, "replace", side_effect=fail_markdown_replace):
+                with self.assertRaises(OSError):
+                    module.main()
+
+            self.assertEqual(markdown.read_bytes(), b"old markdown")
+            self.assertEqual(raw.read_bytes(), b"old raw")
+
+    def test_second_stage_failure_cleans_first_staged_file(self):
+        """Would fail if JSON staging leaves Markdown temp debris after a stage error."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            markdown, raw = root / "clip.md", root / "clip.json"
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.install_success_backend(bins, b'{"segments":[{"start":0,"end":1,"text":"ok", "tokens": [100],"words":[{"start":0,"end":1,"word":"ok"}]}]}')
+            loader = importlib.machinery.SourceFileLoader("transcribe_media_stage_test", str(SCRIPT))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            original_stage = module.stage
+            calls = 0
+
+            def fail_second_stage(destination, body):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("injected second stage failure")
+                return original_stage(destination, body)
+
+            env = os.environ.copy()
+            env["PATH"] = str(bins) + os.pathsep + env["PATH"]
+            argv = [str(SCRIPT), str(source), "--output", str(markdown), "--json-output", str(raw), "--source-label", "clip.mp4"]
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.argv", argv), mock.patch.object(module, "stage", side_effect=fail_second_stage):
+                with self.assertRaises(OSError):
+                    module.main()
+
+            self.assertFalse(markdown.exists())
+            self.assertFalse(raw.exists())
+            self.assertEqual(list(root.glob(".clip.*")), [])
+
+    def test_normalizes_unicode_dashes_in_persisted_source_label(self):
+        """Would fail if transcript labels retain Pd or U+2212 characters."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            bins = root / "bin"
+            bins.mkdir()
+            source = root / "clip.mp4"
+            source.write_bytes(b"media")
+            self.make_stub(bins, "ffprobe", "print('12.5')\n")
+            self.install_success_backend(bins, b'{"segments":[{"start":0,"end":1,"text":"ok", "tokens": [100],"words":[{"start":0,"end":1,"word":"ok"}]}]}')
+
+            result = self.run_transcribe(source, root / "clip.md", root / "clip.json", bins, label="clip\uFE58\uFF0D\u2212.mp4")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / "clip.md").read_bytes().startswith(b"# Transcript: clip---.mp4\n"))
+            self.assertEqual(json.loads(result.stdout)["source_label"], "clip---.mp4")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

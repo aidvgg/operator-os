@@ -10,12 +10,15 @@ automation on the account that performs it, which is exactly why the account per
 none of this.
 
 Usage:
-  scripts/li-fetch <profile-url-or-slug> [--json] [--timeout S]
+  scripts/li-fetch <slug-or-url> [<slug-or-url> ...] [--gate] [--json] [--timeout S]
+  scripts/li-fetch --balance
 
-  <profile-url-or-slug>  full linkedin.com/in/... URL or just the slug. Required, and
-                         there is deliberately no default profile.
-  --json                 raw JSON record instead of the text digest
-  --timeout S            max seconds to wait if Bright Data goes async (default 300)
+  <slug-or-url>  full linkedin.com/in/... URL or just the slug. Multiple profiles are
+                 sent in one Bright Data request.
+  --gate         compact per-prospect block with the fields used by the prospect gate
+  --json         raw JSON records instead of a text digest
+  --timeout S    max seconds to wait if Bright Data goes async (default 300)
+  --balance      show provider balance and status information
 
 Auth: BRIGHTDATA_API_KEY, from the environment first, else from the gitignored env file
 at the repo root (copy .env.example to start). The key is read inside this process and
@@ -360,6 +363,8 @@ def main(argv):
         print(__doc__.strip())
         return 0
     want_json = "--json" in argv
+    want_gate = "--gate" in argv
+    want_balance = "--balance" in argv
     timeout = 300
     if "--timeout" in argv:
         i = argv.index("--timeout")
@@ -369,7 +374,7 @@ def main(argv):
             sys.exit("li-fetch: --timeout needs a number of seconds")
         del argv[i:i + 2]
     args = [a for a in argv if not a.startswith("--")]
-    if len(args) != 1:
+    if not args and not want_balance:
         sys.exit(__doc__.strip())
 
     key = load_key("BRIGHTDATA_API_KEY")
@@ -378,10 +383,22 @@ def main(argv):
                  "gitignored env file at the repo root (copy .env.example to start). "
                  "Refusing to run: an empty digest would read as a thin profile.")
 
-    url = normalize_url(args[0])
+    if want_balance:
+        for path in ("/customer/balance", "/status"):
+            try:
+                status, text = request("GET", "https://api.brightdata.com" + path,
+                                       key, timeout=30)
+            except SystemExit:
+                continue
+            if status == 200 and text:
+                print(f"brightdata {path}: {text.strip()[:400]}")
+        return 0
+
+    urls = [normalize_url(arg) for arg in args]
     q = urllib.parse.urlencode({"dataset_id": DATASET_ID, "include_errors": "true"})
     status, text = request("POST", f"{BASE}/scrape?{q}", key,
-                           body={"input": [{"url": url}]}, op="POST /scrape")
+                           body={"input": [{"url": url} for url in urls]},
+                           timeout=max(90, 30 * len(urls)), op="POST /scrape")
 
     if status == 202:
         snapshot_id = decode_json(text, "POST /scrape", expect=(dict,)).get("snapshot_id")
@@ -390,11 +407,33 @@ def main(argv):
         print(f"li-fetch: async, polling snapshot {snapshot_id} ...", file=sys.stderr)
         payload = poll_snapshot(snapshot_id, key, time.time() + timeout)
     else:
-        payload = decode_json(text, "POST /scrape")
+        if len(urls) > 1:
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                try:
+                    payload = [json.loads(line) for line in text.splitlines() if line.strip()]
+                except json.JSONDecodeError as exc:
+                    fail(f"Bright Data returned invalid NDJSON on POST /scrape: {exc}")
+        else:
+            payload = decode_json(text, "POST /scrape")
 
     recs = records_from(payload)
     if want_json:
         print(json.dumps(recs if len(recs) > 1 else recs[0], ensure_ascii=False, indent=2))
+    elif want_gate:
+        for rec in recs:
+            dates = sorted([item.split("  ")[0] for item in recent_activity(rec)
+                            if item[:1].isdigit()], reverse=True)
+            about = (rec.get("about") or "").replace("\n", " ")
+            print("* %s | %s" % (rec.get("name") or "?", company_of(rec)))
+            print("  headline: %s" % ((rec.get("position") or rec.get("headline") or "-")[:160]))
+            print("  loc: %s | connections %s | followers %s | latest activity %s" % (
+                rec.get("city") or rec.get("location") or "-",
+                rec.get("connections") or "-", rec.get("followers") or "-",
+                dates[0] if dates else "NONE ON RECORD"))
+            print("  about: %s" % (about[:330] or "-"))
+            print("  url: %s" % (rec.get("url") or "-"))
     else:
         print("\n\n".join(digest(r) for r in recs))
 

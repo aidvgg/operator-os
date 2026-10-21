@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Black-box contract tests for scripts/scan-transcript-loops.
+
+Breaks named here: a body decoder loop that passes as clean, an end-of-file
+sign-off loop that blocks, readable repetitive rhetoric misread as a loop, a
+recovery sibling that is ignored or trusted while it still loops, and a
+missing duration that is silently guessed.
+"""
+import json
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "scan-transcript-loops"
+
+
+def segment(start, end, text, compression_ratio=1.5):
+    return {"start": start, "end": end, "text": text, "tokens": [100],
+            "compression_ratio": compression_ratio, "words": []}
+
+
+def readable(start, count, step=5.0):
+    return [segment(start + i * step, start + (i + 1) * step, f" readable sentence number {i}.")
+            for i in range(count)]
+
+
+class ScanTranscriptLoopsTests(unittest.TestCase):
+    def write_pair(self, directory, stem, segments, duration):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{stem}.json").write_text(json.dumps({"segments": segments}))
+        (directory / f"{stem}.md").write_text(
+            f"# Transcript: x\n\n- Duration seconds: `{duration}`\n\n## Segments\n\n")
+        return directory / f"{stem}.json"
+
+    def run_scan(self, *args):
+        result = subprocess.run([str(SCRIPT), *map(str, args)],
+                                text=True, capture_output=True, check=False)
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        return result, records
+
+    def test_clean_transcript_passes(self):
+        """Would fail if ordinary distinct speech is reported as a loop."""
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.write_pair(pathlib.Path(temp), "video-a", readable(0, 40), 300)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(records[0]["status"], "clear")
+            self.assertEqual(records[0]["loop_evidence_body_seconds"], 0.0)
+
+    def test_identical_run_in_body_without_recovery_fails(self):
+        """Would fail if a mid-video repeated-text collapse passes unrecovered."""
+        with tempfile.TemporaryDirectory() as temp:
+            loop = [segment(100 + i * 2.0, 101 + i * 2.0, " Save.") for i in range(10)]
+            path = self.write_pair(pathlib.Path(temp), "video-a", readable(0, 20) + loop + readable(200, 10), 400)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(records[0]["status"], "unrecovered")
+            self.assertEqual(records[0]["loop_evidence_body_seconds"], 19.0)
+            self.assertTrue(records[0]["trigger"])
+            self.assertIsNone(records[0]["recovery_path"])
+
+    def test_sign_off_loop_inside_final_thirty_seconds_does_not_trigger(self):
+        """Would fail if a closing 'Take care.' repetition blocks a readable transcript."""
+        with tempfile.TemporaryDirectory() as temp:
+            tail = [segment(275 + i * 4.0, 279 + i * 4.0, " Take care.") for i in range(6)]
+            path = self.write_pair(pathlib.Path(temp), "video-a", readable(0, 50) + tail, 300)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(records[0]["status"], "clear")
+            self.assertEqual(records[0]["loop_evidence_body_seconds"], 0.0)
+            self.assertGreater(records[0]["loop_evidence_tail_seconds"], 0.0)
+
+    def test_high_compression_segment_with_repeated_phrase_triggers(self):
+        """Would fail if one long segment repeating a phrase escapes the run check."""
+        with tempfile.TemporaryDirectory() as temp:
+            looped = segment(60, 90, " who are hiring a lot of people" * 8, compression_ratio=10.0)
+            path = self.write_pair(pathlib.Path(temp), "video-a", readable(0, 12) + [looped] + readable(90, 20), 400)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(records[0]["loop_evidence_body_seconds"], 30.0)
+
+    def test_repeated_phrase_at_whisper_failure_ratio_counts(self):
+        """Would fail if a loop tail with ratio between 2.4 and 3.0 escapes, as Hiring VAs 14:08 did."""
+        with tempfile.TemporaryDirectory() as temp:
+            looped = segment(60, 90, " so you can do" + " a lot of people who are hiring" * 13, compression_ratio=2.93)
+            path = self.write_pair(pathlib.Path(temp), "video-a", readable(0, 12) + [looped] + readable(90, 20), 400)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(records[0]["loop_evidence_body_seconds"], 30.0)
+
+    def test_repetitive_rhetoric_without_repeated_phrase_does_not_trigger(self):
+        """Would fail if readable parallel phrasing with a high ratio is called a loop."""
+        with tempfile.TemporaryDirectory() as temp:
+            rhetoric = segment(60, 90, " the subject line gets the open the first line gets the read"
+                               " the offer gets the reply and the guarantee gets the call", compression_ratio=2.9)
+            path = self.write_pair(pathlib.Path(temp), "video-a", readable(0, 12) + [rhetoric] + readable(90, 20), 400)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(records[0]["status"], "clear")
+
+    def test_clean_recovery_sibling_resolves_trigger(self):
+        """Would fail if a present, clean loop-recovery sibling is ignored."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            loop = [segment(100 + i * 2.0, 101 + i * 2.0, " Save.") for i in range(10)]
+            path = self.write_pair(root, "video-a", readable(0, 20) + loop + readable(200, 10), 400)
+            self.write_pair(root, "video-a-loop-recovery", readable(0, 70), 400)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(records[0]["status"], "recovered")
+            self.assertEqual(records[0]["recovery_body_seconds"], 0.0)
+            self.assertTrue(records[0]["recovery_path"].endswith("video-a-loop-recovery.json"))
+
+    def test_recovery_sibling_that_still_loops_fails(self):
+        """Would fail if the existence of a recovery file is trusted without scanning it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            loop = [segment(100 + i * 2.0, 101 + i * 2.0, " Save.") for i in range(10)]
+            path = self.write_pair(root, "video-a", readable(0, 20) + loop + readable(200, 10), 400)
+            self.write_pair(root, "video-a-loop-recovery", readable(0, 20) + loop + readable(200, 10), 400)
+
+            result, records = self.run_scan(path)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(records[0]["status"], "recovery-still-looping")
+
+    def test_missing_duration_header_is_an_error(self):
+        """Would fail if the tail boundary is computed from a guessed duration."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "video-a.json").write_text(json.dumps({"segments": readable(0, 5)}))
+            (root / "video-a.md").write_text("# Transcript: x\n\n## Segments\n\n")
+
+            result, _ = self.run_scan(root / "video-a.json")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("duration", result.stderr)
+
+    def test_root_scan_pairs_siblings_and_skips_recovery_files_as_primaries(self):
+        """Would fail if recursion double-counts recovery files or misses nested primaries."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            loop = [segment(100 + i * 2.0, 101 + i * 2.0, " Save.") for i in range(10)]
+            self.write_pair(root / "module-1" / "lesson-1", "video-a", readable(0, 20) + loop + readable(200, 10), 400)
+            self.write_pair(root / "module-1" / "lesson-1", "video-a-loop-recovery", readable(0, 70), 400)
+            self.write_pair(root / "module-2" / "lesson-9", "video-b", readable(0, 40), 300)
+
+            result, records = self.run_scan("--root", root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sorted(record["status"] for record in records), ["clear", "recovered"])
+            self.assertFalse(any(record["path"].endswith("-loop-recovery.json") for record in records))
+
+    def test_nonfinite_backend_diagnostics_are_accepted(self):
+        """Would fail if MLX NaN diagnostics in raw JSON abort the scan."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "video-a.json").write_text(
+                '{"segments":[{"start":0,"end":5,"text":" hi","tokens":[1],"avg_logprob":NaN,'
+                '"compression_ratio":1.2,"words":[]}]}')
+            (root / "video-a.md").write_text("- Duration seconds: `60`\n")
+
+            result, records = self.run_scan(root / "video-a.json")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(records[0]["status"], "clear")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

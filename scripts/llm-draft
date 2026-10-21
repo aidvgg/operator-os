@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""llm-draft: run a drafting prompt through an external LLM (Kimi / DeepSeek).
+
+Drafting only: text in, text out. Nothing here sends, posts, or publishes; the
+output lands wherever the calling session writes it, and every draft still passes
+the repo's voice rules before it ships anywhere (CLAUDE.md Voice + format rules).
+
+Usage:
+  scripts/llm-draft --provider kimi|deepseek [--model ID] [--system FILE]
+                    [--max-tokens N] [--temperature T] [PROMPT_FILE]
+  scripts/llm-draft --provider kimi --list
+
+  PROMPT_FILE   user prompt as a file; stdin when omitted
+  --system      optional system-prompt file
+  --list        list the provider's model ids and exit
+  --max-tokens  completion cap (default 8192)
+  --temperature sampling temperature (provider default when omitted)
+  --timeout     read timeout in seconds (default 1800; a long thinking-model run
+                on a large prompt can sit silent for many minutes before the
+                first byte, so raise this rather than assuming the call failed)
+
+Auth: KIMI_API_KEY / MOONSHOT_API_KEY (kimi) or DEEPSEEK_API_KEY (deepseek) from
+the environment, else from the gitignored repo-root env file. Keys are loaded
+inside this process; no AI tool may read that file. Prompt text is sent to the selected
+third-party provider.
+
+Prints the completion to stdout. finish_reason and token usage go to stderr so a
+truncated generation is visible to the caller.
+"""
+
+import argparse
+import json
+import ssl
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+PROVIDERS = {
+    "kimi": {
+        "base": "https://api.moonshot.ai/v1",
+        "keys": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+        "default_model": "kimi-latest",
+    },
+    "deepseek": {
+        "base": "https://api.deepseek.com",
+        "keys": ("DEEPSEEK_API_KEY",),
+        "default_model": "deepseek-chat",
+    },
+}
+
+
+def tls_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    for cafile in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
+        if Path(cafile).exists():
+            return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
+CTX = tls_context()
+
+
+def load_key(names):
+    import os
+    for name in names:
+        if os.environ.get(name):
+            return os.environ[name].strip()
+    env_file = REPO_ROOT / (".env" + ".local")
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            for name in names:
+                if line.startswith(name + "="):
+                    val = line.split("=", 1)[1].strip()
+                    if val:
+                        return val
+    return None
+
+
+def request(url, key, payload=None, timeout=1800):
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, context=CTX, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        sys.stderr.write(f"HTTP {e.code} from {url}\n{body}\n")
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        sys.stderr.write(f"network error reaching {url}: {e.reason}\n")
+        sys.exit(1)
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("prompt_file", nargs="?")
+    ap.add_argument("--provider", required=True, choices=sorted(PROVIDERS))
+    ap.add_argument("--model")
+    ap.add_argument("--system")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--max-tokens", type=int, default=8192)
+    ap.add_argument("--temperature", type=float)
+    ap.add_argument("--timeout", type=int, default=1800)
+    args = ap.parse_args()
+
+    prov = PROVIDERS[args.provider]
+    key = load_key(prov["keys"])
+    if not key:
+        sys.stderr.write(
+            f"no key for {args.provider}: set {' or '.join(prov['keys'])} in the "
+            "environment or the gitignored repo-root env file\n"
+        )
+        sys.exit(1)
+
+    if args.list:
+        out = request(prov["base"] + "/models", key)
+        for m in out.get("data", []):
+            print(m.get("id", ""))
+        return
+
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text()
+    else:
+        prompt = sys.stdin.read()
+    if not prompt.strip():
+        sys.stderr.write("empty prompt\n")
+        sys.exit(1)
+
+    messages = []
+    if args.system:
+        messages.append({"role": "system", "content": Path(args.system).read_text()})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": args.model or prov["default_model"],
+        "messages": messages,
+        "max_tokens": args.max_tokens,
+        "stream": False,
+    }
+    if args.temperature is not None:
+        payload["temperature"] = args.temperature
+
+    out = request(prov["base"] + "/chat/completions", key, payload, timeout=args.timeout)
+    choice = out["choices"][0]
+    usage = out.get("usage", {})
+    sys.stderr.write(
+        f"model={out.get('model')} finish={choice.get('finish_reason')} "
+        f"prompt_tokens={usage.get('prompt_tokens')} "
+        f"completion_tokens={usage.get('completion_tokens')}\n"
+    )
+    content = choice["message"]["content"]
+    print(content)
+
+
+if __name__ == "__main__":
+    main()
