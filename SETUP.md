@@ -92,6 +92,9 @@ git config core.hooksPath   # prints: .githooks
 scripts/repo-doctor
 ```
 
+Remote agent hosts need the same `core.hooksPath=.githooks` in their clone; `scripts/agent-mutate`
+refuses to commit without it. See `knowledge/ops/remote-agent-hosts.md`.
+
 What you should see on an untouched clone with steps 1 and 2 done:
 
 ```

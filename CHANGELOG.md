@@ -64,6 +64,11 @@ folder trust once (`grok --trust`).
   line budget), `decision-gauntlet`, `call-debrief`, `deep-research`.
 - Verified-absence record validator (`skills/research-doctrine/scripts/validate_absence_records.py`)
   and its fixture suite.
+- Remote-host bookkeeping pipeline: `scripts/agent-mutate` applies a required patch to licensed
+  skill paths only, from a clean listed-path start, and commits only with `core.hooksPath=.githooks`;
+  judgment or owner-file proposals land in `outputs/inbox/`, and `scripts/agent-apply-inbox` applies
+  them only from a TTY after an APPROVED file whose `bundle_sha256` matches. Owner:
+  `knowledge/ops/remote-agent-hosts.md`.
 - CI runs the new test suites.
 
 ### Fixed

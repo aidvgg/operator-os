@@ -192,11 +192,15 @@ Verify with `grep -rniE 'northwind|rivera|sam@' skills/proposal-creator skills/i
 the only hits left are in the two design-standard specimen files, which stay. Then
 `grep -n "NL-" skills/invoice-creator/SKILL.md` must print nothing.
 
-**D4. The one place the operator's first name is functional.** In `scripts/repo-doctor`, the
+**D4. The two places the operator's first name is functional.** In `scripts/repo-doctor`, the
 `_ORIGIN_OK` regex (find it with `grep -n "_ORIGIN_OK = " scripts/repo-doctor`) carries two
 `Sam` tokens: `extended by Sam` and `Sam added`. Replace both with `<FIRST_NAME>`. D3 already
 changed the same vocabulary in `skills/proposal-creator/references/data-schema.md` and
-`skills/proposal-creator/SKILL.md` (D9 catches any prose copy left). Prove there is no other
+`skills/proposal-creator/SKILL.md` (D9 catches any prose copy left). In
+`scripts/artifact-receipt-check`, the `OPERATOR` constant (find it with
+`grep -n '^OPERATOR = ' scripts/artifact-receipt-check`) must equal the actor of every approval
+receipt, so replace `"Sam"` there with `"<FIRST_NAME>"`; D9 then sweeps its docstring example
+and the fixtures in `scripts/test-artifact-receipt`, which must pass after D9. Prove there is no other
 functional first name: `grep -rn "Sam" scripts/ | grep -E "re\.(compile|search|match|sub|findall)|r\"|r'"`
 must print nothing after D9.
 

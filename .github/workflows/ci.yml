@@ -62,6 +62,9 @@ jobs:
       - name: Run invoice arithmetic fixtures
         run: bash scripts/test-invoice-arithmetic
 
+      - name: Run remote host pipeline fixtures
+        run: ./scripts/test-agent-mutate
+
       - name: Run run-coding-session script tests
         run: python3 -m unittest discover -s skills/run-coding-session/scripts -p 'test_*.py'
 

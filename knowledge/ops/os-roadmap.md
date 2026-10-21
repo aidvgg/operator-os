@@ -187,16 +187,16 @@ a generator, or to a validator. One builder plus one fresh-context critic is the
 
 ---
 
-## 8. The ratchet rule
+## 8. Fix error classes by single-sourcing
 
 **LIVE.** It is process, not code, so it applies from the moment it is written down.
 
-A session that fixes a class of quality problem ends by adding the floor check that makes that class
-un-reintroducible, wherever a mechanical check is possible. Cleanups without ratchets are rented,
-not owned: the same defect walks back in through the next tired session, and the second cleanup
-costs the same as the first.
+A recurring error class is fixed by single-sourcing the fact behind it, not by adding a rule. When two
+files can disagree about a price, a count, a path or a grammar, the next tired session reads the
+wrong one. One owning file, or one owning script such as `scripts/clock_grammar.py`, removes the
+disagreement itself; another rule only adds one more thing to remember.
 
-Two constraints keep this from turning into check sprawl:
+Two constraints keep the checks that do get added from turning into sprawl:
 
 - **A new check traces to a real entry in `ai/ERRORS.md`, or to a hazard named in that file's
   Hazards section.** No speculative process. A check invented for a defect nobody has ever hit is a
@@ -212,8 +212,8 @@ mechanism is specified.
 ## 9. Guardrail fixtures: tests that the checks still fire
 
 **PARTLY BUILT.** This section is the specification and owner of the fixture contract.
-`scripts/test-git-guard` is the first standing member: 196 assertions across both PreToolUse guards
-and both host wiring files. The repo-doctor manifest and the section 4 quality-command integration
+`scripts/test-git-guard` is the first standing member: 414 assertions across both PreToolUse guards
+and all three host wiring files. The repo-doctor manifest and the section 4 quality-command integration
 remain planned.
 
 ### 9.1 Why this exists
@@ -321,8 +321,8 @@ speak.
   reason in the message. Adjusting a fixture until it goes green, in its own commit, with no
   explanation, is how a suite becomes a record of what the code currently does rather than a
   statement of what it must do.
-- New check, new pair, same session. That is the ratchet rule of section 8 applied to the
-  enforcement layer itself.
+- New check, new pair, same session. The fixture is the check's single source of what it must
+  flag, which is section 8 applied to the enforcement layer itself.
 
 ---
 
@@ -351,7 +351,7 @@ edges around money, commitments, client deliverables and recovery. Not a bigger 
 | 5. Context boundaries | doctrine BUILT, router PLANNED and not yet needed |
 | 6. Golden benchmark | PLANNED |
 | 7. Recovery prerequisites | BUILT |
-| 8. Ratchet rule | LIVE |
+| 8. Single-sourcing rule | LIVE |
 | 9. Guardrail fixtures | PARTLY BUILT, hook suite live, repo-doctor manifest planned |
 
 Order of work: sections 4 and 9 together, because the runner needs a home. Then 6, which is the only

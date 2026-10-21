@@ -11,9 +11,10 @@ you cannot point at the row a new check exists for, do not add the check.
 
 Rows are append-only and never rewritten to read better. The Control column is the useful half: it
 is what a future session greps to find out whether a class of failure already has a floor under it.
-The ratchet rule says a session that fixes a class of problem ends by putting that floor in, where
-a mechanical check is possible, and states plainly when it is not. A control that can only ever be
-procedural should say so in its own cell, so nobody later mistakes a habit for a guardrail.
+The single-sourcing rule says a recurring class of failure is fixed by giving the fact behind it one
+owner, not by adding another rule; when that owner is a script or a check, the Control cell names it.
+A control that can only ever be procedural should say so in its own cell, so nobody later mistakes a
+habit for a guardrail.
 
 Keep the rows blunt. This file is the one place in the repo where the writing is allowed to be
 unflattering, and softening a row is how the lesson gets lost.
@@ -53,10 +54,10 @@ near-miss behind it does not belong in this section.
   source-shape test there is; and the allow file expires its own entries, so an exception cannot
   outlive the thing it excused. The real control is the **guardrail-fixture suite** specified in
   `knowledge/ops/os-roadmap.md`: known-bad fixtures plus a runner that asserts each check still
-  flags its own fixture. Its first standing member, `scripts/test-git-guard`, now carries 196
-  assertions across both PreToolUse guards and both host wiring files. Until the repo-doctor
-  manifest exists, the remaining checks are still trusted rather than tested, and the ratchet rule
-  in `CLAUDE.md` is what keeps the gap from growing.
+  flags its own fixture. Its first standing member, `scripts/test-git-guard`, now carries 414
+  assertions across both PreToolUse guards and all three host wiring files. Until the repo-doctor
+  manifest exists, the remaining checks are still trusted rather than tested, and single-sourcing
+  each fact a check guards, per `CLAUDE.md`, is what keeps the gap from growing.
   The shape has a second face worth naming, because it is not a check at all. `ai/AGENT_ROUTES.json`
   is the one registry that generates `AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md` and
   the thin Claude commands. A generated view that drifts from its registry leaves every check green

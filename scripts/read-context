@@ -2,7 +2,7 @@
 """Print one bounded JSON page of tracked repository Markdown/text, without writes.
 
 Usage: python3 scripts/read-context CLAUDE.md
-       python3 scripts/read-context knowledge/business/agency-outbound.md --lines 1:100
+       python3 scripts/read-context knowledge/business/outbound-offer.md --lines 1:100
        python3 scripts/read-context knowledge/memory.md --page-bytes 28000
 
 Follow next_command one call at a time. Each response is at most --page-bytes UTF-8 bytes
