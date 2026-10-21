@@ -539,6 +539,10 @@
     {
       "path": "CLAUDE.md",
       "must_contain": "skills/daily-log"
+    },
+    {
+      "path": "scripts/read-context",
+      "must_contain": "END_CONTEXT_PAGE"
     }
   ]
 }

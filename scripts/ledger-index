@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""ledger-index - compact pointers for ai/DECISIONS.md and ai/ERRORS.md, full entries on demand.
+
+Read-only, no network, no state. Lines follow source order, not a resorted chronology.
+
+Usage:
+  scripts/ledger-index                       one compact line per entry, both ledgers, source order
+  scripts/ledger-index decisions|errors      one ledger
+  scripts/ledger-index --open                decision rows still open: no outcome yet, pending, or REOPENED
+  scripts/ledger-index --grep TERM [TERM..]  verbatim entries containing every term (case-insensitive AND)
+  scripts/ledger-index --at FILE:LINE        verbatim entry covering that source line (decisions:N or errors:N)
+  scripts/ledger-index --root DIR ...        another checkout
+
+A compact line is: source pointer | date or kind | title | review | outcome.
+The date is the row's own text, so YYYY-MM-xx stays as written. The title is the first bold
+span, else the cell. Preamble prose before the dated table, and hazard entries, stay pointers until
+--grep or --at. The index never replaces an entry. --grep keeps every term: an entry is a hit
+only when all of them occur in it. Matched text is the source text, unchanged.
+"""
+
+import re
+import sys
+from pathlib import Path
+
+LEDGERS = {"decisions": "ai/DECISIONS.md", "errors": "ai/ERRORS.md"}
+DATE_ROW = re.compile(r"^\| (\d{4}-\d{2}-(?:\d{2}|xx))\b")
+HAZARD_HEAD = re.compile(r"^## Hazards\b")
+AT = {"ai/DECISIONS.md": "decisions", "decisions": "decisions",
+      "ai/ERRORS.md": "errors", "errors": "errors"}
+TITLE = 96
+PENDING = ("⏳", "open", "pending")
+
+
+def load(root, name):
+    path = Path(root) / LEDGERS[name]
+    if not path.is_file():
+        sys.exit("ledger-index: %s not found under %s" % (LEDGERS[name], root))
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def paragraphs(lines, stop):
+    spans, start = [], None
+    for i in range(stop):
+        if lines[i].strip():
+            start = i if start is None else start
+        elif start is not None:
+            spans.append((start, i))
+            start = None
+    if start is not None:
+        spans.append((start, stop))
+    return spans
+
+
+def entries(root, name):
+    lines = load(root, name)
+    table = next((i for i, line in enumerate(lines)
+                  if line.startswith("| Date") or DATE_ROW.match(line)), len(lines))
+    found = []
+    for start, end in paragraphs(lines, table):
+        block = lines[start:end]
+        if not block[0].startswith("#"):
+            found.append((start, block, "preamble"))
+    found += [(i, [line], "row") for i, line in enumerate(lines) if DATE_ROW.match(line)]
+    heads = [i for i, line in enumerate(lines) if HAZARD_HEAD.match(line)]
+    if name == "errors" and heads:
+        i, end = heads[0] + 1, next((j for j, line in enumerate(lines) if j > heads[0] and line.startswith("## ")), len(lines))
+        while i < end:
+            if lines[i].startswith("- "):
+                start = i
+                i += 1
+                while i < end and not lines[i].startswith("- "):
+                    i += 1
+                block = lines[start:i]
+                while block and not block[-1].strip():
+                    block.pop()
+                found.append((start, block, "hazard"))
+            else:
+                i += 1
+    found.sort(key=lambda item: item[0])
+    return found
+
+
+def title(cell):
+    bold = re.search(r"\*\*(.+?)\*\*", cell)
+    text = " ".join((bold.group(1) if bold else cell).split()).rstrip(".:")
+    return text if len(text) <= TITLE else text[:TITLE - 2].rstrip() + ".."
+
+
+def summary(name, line):
+    cells = [cell.strip() for cell in line.strip().strip("|").split(" | ")]
+    if name == "errors" or len(cells) < 5:
+        return "%s | %s" % (cells[0], title(cells[1] if len(cells) > 1 else ""))
+    outcome = " ".join(cells[-1].split())
+    shown = (outcome[:40] + "..") if len(outcome) > 42 else outcome
+    return "%s | %s | %s | %s" % (cells[0], title(cells[1]), cells[-2] or "-", shown or "open")
+
+
+def is_open(line):
+    outcome = line.strip().strip("|").split(" | ")[-1].strip().lower()
+    status = re.sub(r"^[^a-z0-9]+", "", outcome)
+    return not outcome or outcome.startswith(PENDING) or status.startswith("reopened")
+
+
+def pointer(name, start):
+    return "%s:%d" % (LEDGERS[name], start + 1)
+
+
+def compact(name, start, block, kind):
+    body = summary(name, block[0]) if kind == "row" else "%s | %s" % (kind, title(block[0]))
+    return "%s | %s" % (pointer(name, start), body)
+
+
+def show(name, start, block):
+    print("[%s]\n%s\n" % (pointer(name, start), "\n".join(block)))
+
+
+def parse_at(spec):
+    name, _, line = spec.rpartition(":")
+    if name not in AT or not line.isdigit() or int(line) < 1:
+        sys.exit("ledger-index: --at needs decisions:LINE or errors:LINE")
+    return AT[name], int(line)
+
+
+def main(argv):
+    root = Path(__file__).resolve().parent.parent
+    if "--root" in argv:
+        at = argv.index("--root")
+        root, argv = Path(argv[at + 1]), argv[:at] + argv[at + 2:]
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+    if "--at" in argv:
+        spec = argv[argv.index("--at") + 1] if argv.index("--at") + 1 < len(argv) else ""
+        name, line = parse_at(spec)
+        hit = next((item for item in entries(root, name) if item[0] <= line - 1 < item[0] + len(item[1])), None)
+        if hit is None:
+            sys.exit("ledger-index: no entry covers %s" % spec)
+        show(name, hit[0], hit[1])
+        return 0
+    if "--grep" in argv:
+        terms = [term.lower() for term in argv[argv.index("--grep") + 1:]]
+        if not terms:
+            sys.exit("ledger-index: --grep needs at least one term")
+        found = 0
+        for name in LEDGERS:
+            for start, block, _kind in entries(root, name):
+                if all(term in "\n".join(block).lower() for term in terms):
+                    found += 1
+                    show(name, start, block)
+        print("%d row(s) hold: %s" % (found, " + ".join(terms)))
+        return 0
+    names = [name for name in LEDGERS if name in argv] or (["decisions"] if "--open" in argv else list(LEDGERS))
+    open_only = "--open" in argv
+    for name in names:
+        shown = [(start, block, kind) for start, block, kind in entries(root, name)
+                 if not open_only or (kind == "row" and name == "decisions" and is_open(block[0]))]
+        print("# %s, %d row(s)%s" % (LEDGERS[name], len(shown), ", open only" if open_only else ""))
+        print("\n".join(compact(name, start, block, kind) for start, block, kind in shown))
+        print()
+    print("Full entries: scripts/ledger-index --grep TERM [TERM..]   or   --at decisions:LINE")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

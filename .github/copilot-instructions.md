@@ -5,6 +5,12 @@ Platform surface: GitHub Copilot.
 
 Read `CLAUDE.md` in full before acting. It is the canonical shared operating contract for every model, not a Claude-only file. It keeps the filename `CLAUDE.md` so the Claude Code loader still finds it without configuration. Then follow its context routing, precedence, write, safety, and verification rules exactly.
 
+## Required context reads
+
+Start with `python3 scripts/read-context CLAUDE.md` from the repository root. A file that fits one host read is read in one call: in Claude Code, one page at `--page-bytes 28000`; in Codex and every other host, one default 6000-byte page, each size including metadata. A longer file is paged one page per tool call, following each `next_command` until it is null; the command keeps the chosen size. Then read memory and the required topic sources the same way. In Codex, use `exec_command.max_output_tokens: 8000` and the enclosing `functions.exec` first-line directive `// @exec: {"max_output_tokens": 10000}`; print only the command's `output`. On other hosts, allow at least the 6000-byte page.
+
+Keep a checklist of required paths or sections, their hashes and received byte ranges in the task's working context. Add required modules when a router points to them. Before drafting or recommending, require contiguous coverage for every item, a final null `next_command`, and `END_CONTEXT_PAGE` on every page. Recover any tool-truncated or missing page before advancing; restart an item if its hash changes. The reader reports pages, not proof of model comprehension. The canonical contract owns the full protocol and fallback for other authorized input types.
+
 ## Immediate workflow routing
 
 The aliases and fallbacks below are generated from `ai/AGENT_ROUTES.json`, their single owner.

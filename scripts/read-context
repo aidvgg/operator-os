@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Print one bounded JSON page of tracked repository Markdown/text, without writes.
+
+Usage: python3 scripts/read-context CLAUDE.md
+       python3 scripts/read-context knowledge/business/agency-outbound.md --lines 1:100
+       python3 scripts/read-context knowledge/memory.md --page-bytes 28000
+
+Follow next_command one call at a time. Each response is at most --page-bytes UTF-8 bytes
+(default 6000), including metadata and JSON escaping; next_command keeps the chosen size. Byte ranges are zero-based, end-exclusive;
+line ranges are one-based, inclusive. Long lines may span multiple pages. Continuations
+pin the whole file's SHA-256 and fail if it changes. A final page says nothing about
+whether earlier pages reached the model; the agent must track contiguous coverage.
+
+This convenience reader is limited to tracked, non-ignored .md/.txt files in this
+repository. It refuses symlinks, quarantined/private paths and credential filenames.
+Other authorized inputs use their existing read mechanisms and the same budget discipline.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PAGE_BYTES = 6000
+MIN_PAGE_BYTES = 1024
+FILE_LIMIT = 4 * 1024 * 1024
+
+
+def source_bytes(name):
+    rel = Path(name)
+    if (not name or len(name.encode()) > 500 or rel.is_absolute() or name.startswith("-")
+            or ".." in rel.parts or str(rel) != name
+            or any(ord(c) < 32 for c in name)):
+        raise ValueError("use a canonical repository-relative path")
+    if (rel.suffix.lower() not in {".md", ".txt"}
+            or any(part.lower().startswith(".env") for part in rel.parts)
+            or any(part in {"raw", "personal", ".git"} for part in rel.parts)
+            or rel.name.upper() == "PAYMENT-DETAILS.MD"):
+        raise ValueError("path is outside this reader's tracked repository-text scope")
+    target = ROOT
+    for part in rel.parts:
+        target = target / part
+        if target.is_symlink():
+            raise ValueError("symlinks are outside this reader's scope")
+    tracked = subprocess.run(["git", "--literal-pathspecs", "-C", str(ROOT), "ls-files", "--error-unmatch", "--", name],
+                             capture_output=True)
+    ignored = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--no-index", "-q", "--", name],
+                             capture_output=True)
+    if tracked.returncode != 0 or ignored.returncode != 1:
+        raise ValueError("source must be tracked and non-ignored")
+    if not target.is_file():
+        raise ValueError("source must be a regular file")
+    with target.open("rb") as stream:
+        data = stream.read(FILE_LIMIT + 1)
+    if len(data) > FILE_LIMIT:
+        raise ValueError("source exceeds this reader's file-size limit")
+    data.decode("utf-8")
+    if any(byte < 32 and byte not in (9, 10, 13) for byte in data):
+        raise ValueError("source contains non-text control bytes")
+    return data
+
+
+def selection(data, lines):
+    if lines is None:
+        return 0, len(data)
+    match = re.fullmatch(r"([1-9][0-9]*):([1-9][0-9]*)", lines)
+    if match is None:
+        raise ValueError("--lines must be an inclusive START:END range")
+    first, last = map(int, match.groups())
+    starts = [0] + [i + 1 for i, byte in enumerate(data) if byte == 10 and i + 1 < len(data)]
+    count = len(starts) if data else 0
+    if first > last or last > count:
+        raise ValueError("line range is outside the source")
+    return starts[first - 1], starts[last] if last < count else len(data)
+
+
+def page(name, data, lines, start, expected_hash, limit=DEFAULT_PAGE_BYTES):
+    digest = hashlib.sha256(data).hexdigest()
+    lower, upper = selection(data, lines)
+    if start is not None and expected_hash is None:
+        raise ValueError("continuation requires --sha256 from the preceding page")
+    if expected_hash is not None and expected_hash != digest:
+        raise ValueError("source changed or hash is wrong; restart this file's checklist item")
+    start = lower if start is None else start
+    if not lower <= start <= upper or (start == upper and lower != upper):
+        raise ValueError("byte offset is outside the selection")
+    data[:start].decode("utf-8")
+    end = min(start + limit, upper)
+    while True:
+        # End on a code-point boundary even when one long line exceeds the page size.
+        while end > start and end < len(data) and data[end] & 0xC0 == 0x80:
+            end -= 1
+        if end == start and start < upper:
+            raise ValueError(f"--page-bytes {limit} leaves no room for source text after page metadata; use a larger size")
+        command = None
+        if end < upper:
+            args = ["python3", str(ROOT / "scripts/read-context"), name]
+            if lines is not None:
+                args += ["--lines", lines]
+            if limit != DEFAULT_PAGE_BYTES:
+                args += ["--page-bytes", str(limit)]
+            args += ["--start", str(end), "--sha256", digest]
+            command = shlex.join(args)
+        line_range = [data[:start].count(b"\n") + 1,
+                      data[:max(start, end - 1)].count(b"\n") + 1] if data else [0, 0]
+        result = {
+            "path": name,
+            "sha256": digest,
+            "selection_bytes": [lower, upper],
+            "bytes": [start, end],
+            "lines": line_range,
+            "content": data[start:end].decode("utf-8"),
+            "next_command": command,
+            "end_marker": "END_CONTEXT_PAGE",
+        }
+        encoded = (json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8")
+        if len(encoded) <= limit:
+            return encoded
+        if end == start:
+            raise ValueError(f"--page-bytes {limit} cannot hold this page's metadata plus text; use a larger size")
+        end = start + (end - start) * 3 // 4
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("path")
+    parser.add_argument("--lines", help="one-based inclusive line range, e.g. 1:100")
+    parser.add_argument("--start", type=int, help="continuation byte offset from next_command")
+    parser.add_argument("--sha256", help="whole-file hash from next_command")
+    parser.add_argument("--page-bytes", type=int, default=DEFAULT_PAGE_BYTES,
+                        help=f"maximum response size in UTF-8 bytes (default {DEFAULT_PAGE_BYTES})")
+    args = parser.parse_args()
+    try:
+        if args.page_bytes < MIN_PAGE_BYTES:
+            raise ValueError(f"--page-bytes must be at least {MIN_PAGE_BYTES} to hold page metadata plus text")
+        result = page(args.path, source_bytes(args.path), args.lines, args.start, args.sha256, args.page_bytes)
+    except (ValueError, OSError) as error:
+        print(f"read-context: {error}", file=sys.stderr)
+        return 1
+    sys.stdout.buffer.write(result)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
