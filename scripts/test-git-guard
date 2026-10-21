@@ -3,7 +3,7 @@
 
 First standing member of the guardrail-fixture suite
 (knowledge/ops/os-roadmap.md section 9: tests that the checks themselves still
-fire). Asserts five things:
+fire). Asserts six things:
 
   1. every known-bad command string is DENIED by the guard that owns it
      (.claude/hooks/deny-destructive-git.py for git and sweep staging,
@@ -12,8 +12,11 @@ fire). Asserts five things:
   3. target fields, selectors, lists, maps and command strings are scanned,
      while known prose and code fields remain writable. Codex apply_patch calls
      are judged by every envelope header path, never by the patch body,
-  4. malformed hook input fails closed with a valid deny response,
-  5. both hooks are executable and wired to their host-specific tool surfaces.
+  4. malformed hook input, or a missing or broken scripts/lib/agent_guards,
+     fails closed with a valid deny response,
+  5. both hooks are executable and wired to their host-specific tool surfaces
+     on Claude Code, Codex and Grok Build,
+  6. each hook agrees with the shared library on verdict and deny reason.
 
 Honest limit: this proves script behavior and file-level wiring, not that a host
 has trusted and armed its hooks for the current session. Run: scripts/test-git-guard
@@ -23,8 +26,10 @@ import json
 import os
 import pwd
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIT_HOOK = os.path.join(ROOT, ".claude", "hooks", "deny-destructive-git.py")
@@ -34,11 +39,17 @@ CODEX_HOOKS = os.path.join(ROOT, ".codex", "hooks.json")
 USER_NAME = pwd.getpwuid(os.getuid()).pw_name
 USER_HOME = os.path.expanduser("~" + USER_NAME)
 ROOT_GLOB_FROM_HOME = shlex.quote(os.path.relpath(ROOT, USER_HOME)) + "/.e*"
+GROK_HOOKS = os.path.join(ROOT, ".grok", "hooks", "guards.json")
 
 
 def call(tool_name, **tool_input):
-    """A host PreToolUse envelope, tool_name and all."""
+    """A Claude/Codex PreToolUse envelope, snake_case tool_name and all."""
     return {"tool_name": tool_name, "tool_input": tool_input}
+
+
+def call_grok(tool_name, **tool_input):
+    """A Grok Build PreToolUse envelope, camelCase toolName / toolInput."""
+    return {"toolName": tool_name, "toolInput": tool_input}
 
 
 def patch(*lines):
@@ -141,11 +152,22 @@ GIT_DENY_CALLS = [
      call("Bash", command="git commit --no-verify -m x")),
     ("unknown shell-ish tool_name is still scanned",
      call("shell", command="git clean -fd")),
+    ("grok shell: reset --hard",
+     call_grok("run_terminal_command", command="git reset --hard HEAD")),
+    ("grok shell: sweep staging",
+     call_grok("run_terminal_command", command="git add -A")),
+    ("grok shell: commit --no-verify",
+     call_grok("run_terminal_command", command="git commit --no-verify -m x")),
 ]
 
 GIT_ALLOW_CALLS = [
     ("codex/claude shell: plain push",
      call("Bash", command="git push")),
+    ("grok shell: plain push",
+     call_grok("run_terminal_command", command="git push")),
+    ("grok search_replace whose new_string quotes reset --hard", call_grok(
+        "search_replace", file_path="docs/notes.md", old_string="x",
+        new_string="never run git reset --hard here")),
     ("codex apply_patch: doc quoting reset --hard and add -A", call(
         "apply_patch", command=patch(
             "*** Update File: knowledge/ops/agent-hosts.md",
@@ -224,6 +246,12 @@ ENV_DENY = [
     "rg --hidden -g '*.local' KEY .",
     # Default macOS volumes resolve path case-insensitively.
     "cat .ENV.LOCAL",
+    # Heredoc with a BARE delimiter: the body undergoes expansion, so a command
+    # substitution inside it executes and reads the key file. The body stays in
+    # the scanned string and the protected path is caught. Removing
+    # quoted-delimiter bodies must not open this bare-delimiter path.
+    "cat <<EOF\n$(cat .env.local)\nEOF",
+    "cat <<EOF\nprefix $(base64 .env) suffix\nEOF",
 ]
 
 ENV_ALLOW = [
@@ -234,10 +262,19 @@ ENV_ALLOW = [
     "python3 scripts/repo-doctor --staged",
     "ls -a /srv/example/operator-os",
     "ls -d .git*",
-    "ls -d .claude*",
     "find . -name '*.md'",
     "find . -name '*[[:digit:]].md'",
     "rg -n trusted knowledge --glob '!**/.env*'",
+    # Heredoc with a QUOTED or escaped delimiter: the body is literal stdin the
+    # shell never expands, so it is dropped before tokenizing. An unbalanced
+    # apostrophe in it no longer trips the lexer (an earlier false-deny), and
+    # literal text naming the key file is data, not access. The last case pairs
+    # with the ENV_DENY bare-delimiter twin: same body, quoted delimiter allows,
+    # bare delimiter denies.
+    "git commit -F - <<'EOF'\nfix the pain-point row's status\nEOF",
+    "cat <<\"EOF\"\nkeys live in .env.local, don't panic\nEOF",
+    "cat <<-'EOF'\n\tan indented row's literal body\n\tEOF",
+    "cat <<'EOF'\n$(cat .env.local)\nEOF",
 ]
 
 # --- env-file guard, full envelopes.
@@ -247,6 +284,12 @@ ENV_DENY_CALLS = [
     ("claude Edit of .env", call("Edit", file_path="./.env")),
     ("claude Write of .env.local", call(
         "Write", file_path=".env.local", content="X_API_KEY=whatever")),
+    ("grok read_file of .env.local", call_grok(
+        "read_file", target_file=os.path.join(ROOT, ".env.local"))),
+    ("grok write of .env.local", call_grok(
+        "write", file_path=".env.local", content="X_API_KEY=whatever")),
+    ("grok shell cat .env.local", call_grok(
+        "run_terminal_command", command="cat .env.local")),
     ("claude Grep glob selects protected content", call(
         "Grep", pattern="KEY", path=ROOT, glob="*.local",
         output_mode="content")),
@@ -290,6 +333,12 @@ ENV_ALLOW_CALLS = [
     ("claude Write whose CONTENT mentions .env.local", call(
         "Write", file_path="docs/notes.md",
         content="the keys live in .env.local and agents may not read it")),
+    ("grok write whose CONTENT mentions .env.local", call_grok(
+        "write", file_path="docs/notes.md",
+        content="the keys live in .env.local and agents may not read it")),
+    ("grok search_replace whose new_string mentions .env.local", call_grok(
+        "search_replace", file_path="CLAUDE.md", old_string="x",
+        new_string="keys live ONLY in the gitignored .env.local")),
     ("claude Edit whose new_string mentions .env.local", call(
         "Edit", file_path="CLAUDE.md", old_string="x",
         new_string="keys live ONLY in the gitignored .env.local")),
@@ -339,6 +388,8 @@ WIRING = [
     (SETTINGS, ENV_HOOK, (), True),
     (CODEX_HOOKS, GIT_HOOK, ("Bash",), False),
     (CODEX_HOOKS, ENV_HOOK, (), True),
+    (GROK_HOOKS, GIT_HOOK, ("run_terminal_command",), False),
+    (GROK_HOOKS, ENV_HOOK, (), True),
 ]
 
 MALFORMED_ENV_DENY = [
@@ -361,6 +412,51 @@ MALFORMED_ENV_DENY = [
     ("numeric member in defensive argv", json.dumps({
         "tool_name": "Bash", "tool_input": {"command": [42]}})),
 ]
+
+# The git guard has no envelope to judge when the JSON itself is broken, so it
+# fails closed too rather than exiting without JSON (which fails open).
+MALFORMED_GIT_DENY = [
+    ("invalid JSON", "{"),
+]
+
+
+# Deny-REASON checks: a fail-closed on unparseable input must deny
+# with a reason that does NOT claim a protected-path match, so an agent does not
+# misread a parse failure as a key-file access. Each row is
+# (label, command, expect_deny, kind) where kind is "match" (the key-file
+# reason), "failclosed" (the neutral parse/analysis reason), or None (allow).
+KEY_REASON_MARK = "live API keys"
+FAILCLOSED_MARK = "not a detected .env access"
+REASON_CHECKS = [
+    ("bare-delimiter cmd-sub reading the key file denies as a real match",
+     "cat <<EOF\n$(cat .env.local)\nEOF", True, "match"),
+    ("bare-delimiter apostrophe body fails closed, not reported as a match",
+     "cat <<EOF\nthis body won't parse\nEOF", True, "failclosed"),
+    ("plain unbalanced quote fails closed, not reported as a match",
+     "git commit -m 'unterminated", True, "failclosed"),
+    ("quoted-delimiter apostrophe body is allowed outright",
+     "git commit -F - <<'EOF'\nfix the row's status\nEOF", False, None),
+]
+
+
+def hook_reason(hook, payload):
+    """Return (verdict, reason) so a deny's phrasing can be asserted."""
+    proc = subprocess.run(
+        [sys.executable, hook],
+        input=json.dumps(payload),
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    if proc.returncode != 0:
+        return ("invalid", "")
+    out = proc.stdout.strip()
+    if not out:
+        return ("allow", "")
+    try:
+        info = json.loads(out)["hookSpecificOutput"]
+        verdict = "deny" if info["permissionDecision"] == "deny" else "invalid"
+        return (verdict, info.get("permissionDecisionReason", ""))
+    except Exception:
+        return ("invalid", out)
 
 
 def hook_result_raw(hook, raw_input):
@@ -397,6 +493,161 @@ def check(failures, hook, label, payload, expect_deny):
         os.path.basename(hook), "DENY" if expect_deny else "ALLOW", got, label))
 
 
+def check_worktree_family(failures):
+    """Exercise family discovery using metadata only, never protected files."""
+    with tempfile.TemporaryDirectory(prefix="guard-worktrees-") as temp:
+        primary = os.path.join(temp, "primary")
+        current = os.path.join(temp, "current")
+        sibling = os.path.join(temp, "sibling")
+        common = os.path.join(primary, ".git")
+        current_admin = os.path.join(common, "worktrees", "current")
+        sibling_admin = os.path.join(common, "worktrees", "sibling")
+        hook_dir = os.path.join(current, ".claude", "hooks")
+        os.makedirs(current_admin)
+        os.makedirs(sibling_admin)
+        os.makedirs(hook_dir)
+        os.makedirs(sibling)
+
+        current_marker = os.path.join(current, ".git")
+        sibling_marker = os.path.join(sibling, ".git")
+        with open(current_marker, "w", encoding="utf-8") as handle:
+            handle.write("gitdir: %s\n" % current_admin)
+        with open(sibling_marker, "w", encoding="utf-8") as handle:
+            handle.write("gitdir: %s\n" % sibling_admin)
+        for admin, marker in ((current_admin, current_marker),
+                              (sibling_admin, sibling_marker)):
+            with open(os.path.join(admin, "commondir"), "w", encoding="utf-8") as handle:
+                handle.write("../..\n")
+            with open(os.path.join(admin, "gitdir"), "w", encoding="utf-8") as handle:
+                handle.write(marker + "\n")
+
+        copied_hook = os.path.join(hook_dir, os.path.basename(ENV_HOOK))
+        shutil.copy2(ENV_HOOK, copied_hook)
+        # Hooks are thin adapters over scripts/lib/agent_guards; copy the library
+        # into the synthetic tree so import-by-repo-root still resolves.
+        lib_src = os.path.join(ROOT, "scripts", "lib")
+        lib_dst = os.path.join(current, "scripts", "lib")
+        shutil.copytree(lib_src, lib_dst)
+        for label, root in (("synthetic current worktree glob", current),
+                            ("synthetic primary worktree glob", primary),
+                            ("synthetic sibling worktree glob", sibling)):
+            check(failures, copied_hook, label,
+                  call("Glob", path=root, pattern=".e*"), True)
+        check(failures, copied_hook, "synthetic sibling safe glob",
+              call("Glob", path=sibling, pattern="**/*.md"), False)
+        check(failures, copied_hook, "synthetic sibling relative dot-segment glob",
+              call("Bash", command="cd %s; ls .claude/../.e*" % sibling), True)
+        check(failures, copied_hook, "synthetic sibling absolute dot-segment glob",
+              call("Bash", command="ls %s/.claude/../.e*" % sibling), True)
+        check(failures, copied_hook, "synthetic wildcard parent is ambiguous",
+              call("Bash", command="cd %s; ls '*/../notes/*.md'" % sibling), True)
+        check(failures, copied_hook, "synthetic safe dot-segment glob",
+              call("Bash", command="cd %s; ls .claude/../docs/*.md" % sibling), False)
+
+        # A linked worktree nested under `.claude/worktrees/` puts protected
+        # `.env` paths below `.claude`, and Python fnmatch lets `*` span
+        # slashes, so `.claude*` is a real selector of a protected path. Kept
+        # synthetic: the verdict depends on where the worktrees live.
+        nested = os.path.join(current, ".claude", "worktrees", "nested")
+        nested_admin = os.path.join(common, "worktrees", "nested")
+        os.makedirs(nested)
+        os.makedirs(nested_admin)
+        with open(os.path.join(nested_admin, "gitdir"), "w", encoding="utf-8") as handle:
+            handle.write(os.path.join(nested, ".git") + "\n")
+        check(failures, copied_hook, "synthetic nested worktree under .claude*",
+              call("Bash", command="cd %s; ls -d .claude*" % current), True)
+
+        with open(current_marker, "w", encoding="utf-8") as handle:
+            handle.write("not a gitdir pointer\n")
+        check(failures, copied_hook, "malformed synthetic Git metadata",
+              call("Glob", path=current, pattern="**/*.md"), True)
+
+
+IMPORT_FAILURES = ("missing", "broken")
+
+
+def check_import_failure(failures):
+    """A missing or broken guard library must still print a fail-closed deny."""
+    for hook in (GIT_HOOK, ENV_HOOK):
+        for case in IMPORT_FAILURES:
+            with tempfile.TemporaryDirectory(prefix="guard-nolib-") as temp:
+                hook_dir = os.path.join(temp, ".claude", "hooks")
+                os.makedirs(hook_dir)
+                copied_hook = os.path.join(hook_dir, os.path.basename(hook))
+                shutil.copy2(hook, copied_hook)
+                if case == "broken":
+                    lib = os.path.join(temp, "scripts", "lib", "agent_guards")
+                    os.makedirs(lib)
+                    with open(os.path.join(lib, "__init__.py"), "w") as handle:
+                        handle.write("raise RuntimeError('broken guard library')\n")
+                verdict, reason = hook_reason(
+                    copied_hook, {"tool_input": {"command": "git status"}})
+                if verdict != "deny" or "failing closed" not in reason:
+                    failures.append(
+                        "%s with a %s library should fail closed but %s"
+                        % (os.path.basename(hook), case, verdict))
+
+
+def check_library_hook_parity(failures):
+    """Library deny must match hook deny for shared fixtures (no drift)."""
+    lib_dir = os.path.join(ROOT, "scripts", "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    from agent_guards.env import check_env_command, evaluate_env_envelope
+    from agent_guards.git import check_git_command, evaluate_git_envelope
+
+    def lib_git_denied(payload):
+        return evaluate_git_envelope(payload) is not None
+
+    def lib_env_denied(payload):
+        return evaluate_env_envelope(payload, project_root=ROOT) is not None
+
+    for command in GIT_DENY + GIT_ALLOW:
+        payload = {"tool_input": {"command": command}}
+        hook = hook_result(GIT_HOOK, payload) == "deny"
+        lib = lib_git_denied(payload)
+        if hook != lib:
+            failures.append(
+                "parity git: hook=%s lib=%s for %r"
+                % ("deny" if hook else "allow", "deny" if lib else "allow", command))
+        if hook:
+            _, reason = hook_reason(GIT_HOOK, payload)
+            lib_deny = check_git_command(command)
+            if lib_deny is None or lib_deny.reason != reason:
+                failures.append("parity git reason drift: %r" % command)
+
+    for command in ENV_DENY + ENV_ALLOW:
+        payload = {"tool_input": {"command": command}}
+        hook = hook_result(ENV_HOOK, payload) == "deny"
+        lib = lib_env_denied(payload)
+        if hook != lib:
+            failures.append(
+                "parity env: hook=%s lib=%s for %r"
+                % ("deny" if hook else "allow", "deny" if lib else "allow", command))
+        if hook:
+            _, reason = hook_reason(ENV_HOOK, payload)
+            lib_deny = check_env_command(command, project_root=ROOT)
+            if lib_deny is None or lib_deny.reason != reason:
+                failures.append("parity env reason drift: %r" % command)
+
+    for label, payload in GIT_DENY_CALLS + GIT_ALLOW_CALLS:
+        hook = hook_result(GIT_HOOK, payload) == "deny"
+        lib = lib_git_denied(payload)
+        if hook != lib:
+            failures.append(
+                "parity git call: hook=%s lib=%s for %s"
+                % ("deny" if hook else "allow", "deny" if lib else "allow", label))
+
+    for label, payload in ENV_DENY_CALLS + ENV_ALLOW_CALLS:
+        hook = hook_result(ENV_HOOK, payload) == "deny"
+        lib = lib_env_denied(payload)
+        if hook != lib:
+            failures.append(
+                "parity env call: hook=%s lib=%s for %s"
+                % ("deny" if hook else "allow", "deny" if lib else "allow", label))
+
+
+
 def main():
     failures = []
 
@@ -429,6 +680,32 @@ def main():
             failures.append(
                 "%s should DENY but %s: %s"
                 % (os.path.basename(ENV_HOOK), verdict, label))
+
+    for label, raw_input in MALFORMED_GIT_DENY:
+        verdict = hook_result_raw(GIT_HOOK, raw_input)
+        if verdict != "deny":
+            failures.append(
+                "%s should DENY but %s: %s"
+                % (os.path.basename(GIT_HOOK), verdict, label))
+
+    for label, command, expect_deny, kind in REASON_CHECKS:
+        verdict, reason = hook_reason(ENV_HOOK, {"tool_input": {"command": command}})
+        want = "deny" if expect_deny else "allow"
+        if verdict != want:
+            failures.append("reason-check verdict: %s should %s but %s"
+                            % (label, want, verdict))
+            continue
+        if kind == "match" and KEY_REASON_MARK not in reason:
+            failures.append(
+                "reason-check: %s should cite a protected-path match" % label)
+        if kind == "failclosed" and (
+                KEY_REASON_MARK in reason or FAILCLOSED_MARK not in reason):
+            failures.append(
+                "reason-check: %s should read as fail-closed, not a match" % label)
+
+    check_library_hook_parity(failures)
+    check_worktree_family(failures)
+    check_import_failure(failures)
 
     # wiring: executable + referenced from each host's PreToolUse entry with the
     # host-specific matcher contract.
@@ -469,20 +746,31 @@ def main():
                             % (settings_path, wanted, name))
 
     # counted by the hook each assertion exercises, cross-guard runs included
-    git_deny = len(GIT_DENY) + len(GIT_DENY_CALLS)
+    # worktree family: 8 deny and 2 allow checks in check_worktree_family
+    git_deny = (len(GIT_DENY) + len(GIT_DENY_CALLS) + len(MALFORMED_GIT_DENY)
+                + len(IMPORT_FAILURES))
     git_allow = len(GIT_ALLOW) + len(GIT_ALLOW_CALLS) + len(ENV_ALLOW_CALLS)
-    env_deny = len(ENV_DENY) + len(ENV_DENY_CALLS) + len(MALFORMED_ENV_DENY)
-    env_allow = len(ENV_ALLOW) + len(ENV_ALLOW_CALLS) + len(GIT_ALLOW_CALLS)
+    env_deny = (len(ENV_DENY) + len(ENV_DENY_CALLS)
+                + len(MALFORMED_ENV_DENY) + len(IMPORT_FAILURES) + 8)
+    env_allow = len(ENV_ALLOW) + len(ENV_ALLOW_CALLS) + len(GIT_ALLOW_CALLS) + 2
+    reason = len(REASON_CHECKS)
     wiring = 2 * len(WIRING)
-    total = git_deny + git_allow + env_deny + env_allow + wiring
+    # parity: each shared command/call compared once (deny+allow lists + calls);
+    # reason-string checks only fire on the deny subset but are counted in the
+    # command loops as part of those same cases when denied.
+    parity = (len(GIT_DENY) + len(GIT_ALLOW) + len(ENV_DENY) + len(ENV_ALLOW)
+              + len(GIT_DENY_CALLS) + len(GIT_ALLOW_CALLS)
+              + len(ENV_DENY_CALLS) + len(ENV_ALLOW_CALLS))
+    total = git_deny + git_allow + env_deny + env_allow + reason + wiring + parity
     if failures:
         for line in failures:
             print("FAIL  %s" % line)
         print("test-git-guard: %d/%d assertions failed" % (len(failures), total))
         return 1
     print("test-git-guard: all %d assertions green (git %d deny / %d allow, "
-          "env %d deny / %d allow, %d wiring)" % (
-              total, git_deny, git_allow, env_deny, env_allow, wiring))
+          "env %d deny / %d allow, %d reason, %d wiring, %d lib-parity)" % (
+              total, git_deny, git_allow, env_deny, env_allow, reason, wiring,
+              parity))
     return 0
 
 

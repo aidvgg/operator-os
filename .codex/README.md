@@ -1,9 +1,9 @@
 # `.codex/` - the Codex host layer
 
-Hand-maintained, the Codex counterpart of `.claude/`. Not generated: only the markdown discovery
-surfaces (`AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.agents/skills/*/SKILL.md`,
-`.claude/skills/*/SKILL.md`, and the thin `.claude/commands/` files) come from
-`scripts/sync-agent-adapters`.
+Hand-maintained, the Codex counterpart of `.claude/` and `.grok/`. Not generated: only the
+markdown discovery surfaces (`AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`,
+`.agents/skills/*/SKILL.md`, `.claude/skills/*/SKILL.md`, and the thin `.claude/commands/` files)
+come from `scripts/sync-agent-adapters`.
 
 | File | What it does |
 |---|---|
@@ -47,7 +47,7 @@ so it is your call; this template does not ship it. Treat the hooks as the floor
 
 ## Verifying the layer
 
-`scripts/test-git-guard` runs both guard scripts against 196 assertions and checks both host wiring
-files. It proves script behavior and file-level wiring, not that a host invokes the hooks: Codex-side
-registration is this directory plus the trust prompt above, and only an interactive Codex session
-can confirm the hooks are armed.
+`scripts/test-git-guard` runs both guard scripts against 414 assertions and checks all three host
+wiring files. It proves script behavior and file-level wiring, not that a host invokes the hooks:
+Codex-side registration is this directory plus the trust prompt above, and only an interactive Codex
+session can confirm the hooks are armed.
