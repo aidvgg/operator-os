@@ -23,7 +23,7 @@ Canonical workflow: `skills/daily-log/SKILL.md`.
 
 Aliases: `plan my day`, `plan the day`, `let's plan my day`, `let's plan the day`, `daily plan`, `daily planning`.
 
-Platform exception: Codex owns /plan as its built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log.
+Platform exception: Codex and Grok Build own /plan as their built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log.
 
 First-turn contract for `/plan` only:
 

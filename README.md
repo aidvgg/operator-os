@@ -10,7 +10,7 @@
 
 - **It produces the documents.** Branded proposals and invoices as real PDFs, numbered from a ledger, never from memory.
 - **It keeps the clock.** Deadlines live in the files, and overdue ones surface at the start of every session.
-- **It has brakes.** Guard scripts block the agent from leaking bank details, reading secrets, or wiping work, and 196 test assertions check that the guards still fire.
+- **It has brakes.** Guard scripts block the agent from leaking bank details, reading secrets, or wiping work, and 414 test assertions check that the guards still fire.
 
 ```
 git clone https://github.com/aidvgg/operator-os.git
@@ -59,7 +59,7 @@ The template ships with a **fictional worked example** (Sam Rivera / Northwind L
 part of it can be run end to end on day one. The setup clears that demo and puts your
 business in its place.
 
-**Version:** 2.2.0. Changes per release: [`CHANGELOG.md`](CHANGELOG.md). The default branch is `main`.
+**Version:** 2.3.0. Changes per release: [`CHANGELOG.md`](CHANGELOG.md). The default branch is `main`.
 
 ---
 
@@ -80,6 +80,7 @@ How the folder is laid out. Each row is one top-level folder and the one job it 
 | `.githooks/` | Pre-commit and pre-push enforcement. |
 | `.claude/` | Claude Code host layer: settings, the PreToolUse guards, subagents, commands, workflows, and `product-marketing-context.md`, the router the vendored copy/SEO skills read before asking questions. |
 | `.codex/` | Codex host layer: config, hook wiring for the same guard scripts, agent mirrors. |
+| `.grok/` | Grok Build host layer: config, hook wiring for the same guard scripts, agent mirrors. |
 | `raw/` | Quarantined dumps. Never truth until distilled. Gitignored, so it is absent on a fresh clone; make it when you have something to quarantine. |
 
 ## The guardrails
@@ -102,13 +103,18 @@ with one job, and each complains out loud rather than passing quietly.
 - `scripts/pdf-check` and `scripts/docx-check` prove a generated document is really that format and
   not renamed text.
 - `scripts/sync-agent-adapters` regenerates the cross-model adapter views and the per-skill discovery
-  adapters from one routing registry, so Claude Code, Codex, Gemini CLI and GitHub Copilot get the
-  same instructions from a single owner.
+  adapters from one routing registry, so Claude Code, Codex, Grok Build, Gemini CLI and GitHub Copilot
+  get the same instructions from a single owner.
 - `.claude/hooks/deny-env-access.py` and `.claude/hooks/deny-destructive-git.py` are PreToolUse
   guards: the first scans target fields, selectors and bounded shell forms for the gitignored key
   files, while the second denies no-verify commits and pushes, sweep staging, hard resets, forced
-  cleans and forced or deleting pushes. `scripts/test-git-guard` carries 196 assertions proving both
-  guards and both host wiring files.
+  cleans and forced or deleting pushes. Both are thin adapters over the shared library
+  `scripts/lib/agent_guards` (also a CLI, `scripts/agent-guard`) and fail closed when it cannot load.
+  `scripts/test-git-guard` carries 414 assertions proving both guards and all three host wiring
+  files.
+- `scripts/artifact-receipt-check` validates the approval and transition receipts that bind a
+  client-facing send to the exact bytes the operator approved. A clean receipt proves consistency,
+  never authority.
 
 Tool-call guards are a floor, not a fence. A nested interpreter can synthesize a path without
 placing a detectable spelling or resolving selector in the envelope. The guards stop the accidental
@@ -124,7 +130,10 @@ agent mirrors) plus `$skill` adapters generated under `.agents/skills/`. Codex g
 twice: project trust makes `.codex/config.toml` and the agents live, and hook trust is a separate,
 per-content-hash grant you make interactively by running `codex` at the repo root and accepting the
 hook-review prompt; until you do, neither guard fires under Codex and Codex does not say so. Re-arm
-after any edit to `.codex/hooks.json`. Details: `.codex/README.md`. Gemini CLI and GitHub Copilot get
+after any edit to `.codex/hooks.json`. Details: `.codex/README.md`. Grok Build (`.grok/`) runs the
+same contract: it loads `AGENTS.md` and `CLAUDE.md`, scans both adapter trees, and wires the same
+guards in `.grok/hooks/guards.json`, all behind one folder trust (`grok --trust` at the repo root).
+Details: `.grok/README.md`. Gemini CLI and GitHub Copilot get
 generated instruction views (`GEMINI.md`, `.github/copilot-instructions.md`) that point back at the
 canonical files. `ai/AGENT_ROUTES.json` owns the routing; `scripts/sync-agent-adapters --write`
 generates `AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, the daily-log workflow views,
@@ -159,8 +168,9 @@ notes each. Native Windows is untested; use WSL.
 
 What this costs to run. The template is free software. Running it is not: you need an AI coding agent (a Claude Code
 subscription or an API budget), and, only if you use them, paid third-party provider keys for the
-LinkedIn and X fetch scripts (`scripts/li-fetch`, `scripts/x-fetch`), and an rclone-reachable cloud
-remote for the backup. Nothing else phones home.
+LinkedIn and X fetch scripts (`scripts/li-fetch`, `scripts/x-fetch`) and the drafting script
+(`scripts/llm-draft`), and an rclone-reachable cloud remote for the backup. Nothing else phones home,
+apart from `scripts/transcribe-media` fetching its pinned local speech engine and model on first use.
 
 ## Support
 

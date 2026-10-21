@@ -12,9 +12,8 @@ edited there first and mirrored second. It also holds the machine-side setup (do
 scheduled jobs, backup, secrets posture) and a dated log of reversible tool choices.
 
 `os-roadmap.md` - the improvement direction for the OS itself, and the **owner of the
-guardrail-fixture specification** that `CLAUDE.md`'s ratchet rule points at. It is a roadmap, not
-a status claim: every item says plainly whether it is built or planned, and it arms no deadline by
-itself.
+guardrail-fixture specification**. It is a roadmap, not a status claim: every item says plainly
+whether it is built or planned, and it arms no deadline by itself.
 
 `logbook/` - the daily operating ledger: plan, log, accountability, stats. Maintained only by
 `skills/daily-log` through `/plan`, `/standup`, `/eod` and `/weekly`. `LOGBOOK.md` carries the

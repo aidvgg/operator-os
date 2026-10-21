@@ -1,6 +1,7 @@
 # Ported from .claude/agents/fact-check.md (Claude Code subagent definition).
-# The Claude copy under .claude/agents/ and THIS file are two views of the same agent.
-# Change them together. Editing one without the other silently forks the agent's rules.
+# The Claude copy under .claude/agents/, the Grok copy under .grok/agents/<name>.md and THIS
+# file are three views of the same agent. Change them together. Editing one without the others
+# silently forks the agent's rules.
 # Claude-side frontmatter `tools: Read, Grep, Glob, Bash` has no Codex equivalent key.
 # The write ban it implied is carried here by sandbox_mode = "read-only" plus the
 # read-only rule stated inside developer_instructions.

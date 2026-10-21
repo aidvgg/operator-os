@@ -77,7 +77,11 @@ Use this branch only to check supplied invoice arithmetic, currency, or a mismat
   "tax": "0.00",
   "total": "$2,500.00",
   "schedule": {
-    "rows": [ { "label": "1 of 3", "period": "End of July 2026", "status": "This invoice", "amount": "2,500.00", "current": true } ],
+    "rows": [
+      { "label": "1 of 3", "period": "End of July 2026", "status": "This invoice", "amount": "2,500.00", "current": true },
+      { "label": "2 of 3", "period": "End of August 2026", "status": "Upcoming", "amount": "2,500.00" },
+      { "label": "3 of 3", "period": "End of September 2026", "status": "Upcoming", "amount": "2,500.00" }
+    ],
     "contractTotal": "7,500.00",
     "note": "optional paragraph under the table"
   },

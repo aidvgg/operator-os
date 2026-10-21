@@ -32,6 +32,39 @@ jobs:
       - name: Run research-doctrine absence-record fixtures
         run: ./scripts/test-research-doctrine-absence
 
+      - name: Run repo-doctor tombstone prefilter fixtures
+        run: ./scripts/test-doctor-tombstone-prefilter
+
+      - name: Run repo-doctor secret-prefix fixtures
+        run: ./scripts/test-doctor-secret-prefix
+
+      - name: Run repo-doctor start-cache fixtures
+        run: ./scripts/test-doctor-start-cache
+
+      - name: Run read-context fixtures
+        run: ./scripts/test-read-context
+
+      - name: Run ledger-index fixtures
+        run: ./scripts/test-ledger-index
+
+      - name: Run artifact receipt fixtures
+        run: ./scripts/test-artifact-receipt
+
+      - name: Run extract-pdf-text fixtures
+        run: ./scripts/test-extract-pdf-text
+
+      - name: Run transcribe-media fixtures
+        run: ./scripts/test-transcribe-media
+
+      - name: Run scan-transcript-loops fixtures
+        run: ./scripts/test-scan-transcript-loops
+
+      - name: Run invoice arithmetic fixtures
+        run: bash scripts/test-invoice-arithmetic
+
+      - name: Run run-coding-session script tests
+        run: python3 -m unittest discover -s skills/run-coding-session/scripts -p 'test_*.py'
+
       - name: Compile extensionless Python scripts
         run: |
           find scripts -maxdepth 1 -type f ! -name "*.*" -print0 \

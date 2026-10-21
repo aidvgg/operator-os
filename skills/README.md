@@ -4,7 +4,7 @@ One folder per skill, each with a `SKILL.md` (the instructions) plus any `script
 
 `CLAUDE.md` ("Skills" section) is the authoritative inventory: invocation rules, write licences, verification gates, local-run notes. This file lists what exists and points there for policy, so the two cannot drift into a fight. Provider discovery wrappers (`AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, the generated skill views) come from `ai/AGENT_ROUTES.json`; they point here and never own workflow policy.
 
-## First-party (9)
+## First-party (13)
 
 Written for this operation. These are the ones that carry write licences and verification gates, all defined in `CLAUDE.md`.
 
@@ -13,10 +13,14 @@ Written for this operation. These are the ones that carry write licences and ver
 - `daily-log` - the daily operating logbook: plan, standup, end of day, weekly review. Accountability and stats, not a capture inbox.
 - `business-profile-creator` - read-and-merge update of the business profile JSON. Never a blank-slate rebuild.
 - `prospect-brief` - turns a prospect URL into a decision-ready brief: qualification ladder applied as written, pain-bank match, opener prep. No send authority.
-- `research-doctrine` - phase-separated, source-tiered, adversarially audited research for decision-grade work. Its `OPERATOR-INTERNAL.md` binds the generic doctrine to this repo's paths; read it alongside `SKILL.md` when running it here.
+- `research-doctrine` - self-routing epistemic assurance for research and decisions: atomic coverage, assurance classes, fresh-context closure. Its `OPERATOR-INTERNAL.md` binds the generic doctrine to this repo's paths; read it alongside `SKILL.md` when running it here.
+- `deep-research` - scoped retrieval executor: 3+ search angles, up to 15 sources, 3-vote claim verification. Runs as a Phase B lane under `research-doctrine`.
 - `hard-task` - the Tier-2 protocol for high-stakes work no skill covers; `/hard-task` in Claude Code, `$hard-task` in Codex, read directly on any other host.
 - `harvest` - end-of-session content harvest: 1-3 receipt-backed seeds to `outputs/content/seeds/`. Never posts.
 - `onboard` - takes a fresh clone from the shipped demo to one person's business: first-run steps, a plain-language interview one question at a time, the rebrand, the demo wipe, verification with the repo's own scripts, and the first commit. `/onboard` in Claude Code, `$onboard` in Codex, or just say "Set up Operator OS for me". Never reads the payment or key files, never pushes. Its replacement files for the registers and the core live in `skills/onboard/templates/`.
+- `decision-gauntlet` - chat-only stress test of an idea, plan, price or build, one judgment question per turn. Writes nothing; ends with a non-authorizing `CHAT-ONLY` recommendation.
+- `call-debrief` - a call, transcript or recollection into eight evidence-bounded sections, with durable facts and real commitments routed into existing owners. No transcript vault or call registry.
+- `run-coding-session` - coding work in another repository or a greenfield build: baseline, frozen task contract, executable gates, fresh-context evaluation. Its net line budget is opt-in and installed by the operator only.
 
 ## Vendored reference library (17)
 

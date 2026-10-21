@@ -58,7 +58,7 @@
             {
               "platform": "Codex and AGENTS.md-compatible agents",
               "alias": "/plan",
-              "reason": "Codex owns /plan as its built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log."
+              "reason": "Codex and Grok Build own /plan as their built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log."
             },
             {
               "platform": "Codex and Agent Skills-compatible agents",

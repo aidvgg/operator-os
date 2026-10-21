@@ -6,15 +6,69 @@ is the `version` field in `package.json`; `README.md` restates it and this file 
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-21
+
+A sync of fixes and capabilities from the operating repo this template is drawn from: a third host,
+a shared guard library, new evidence tools, four first-party skills and a research doctrine rebuild.
+Existing Codex clones must re-arm hook trust because `.codex/hooks.json` changed; Grok Build needs
+folder trust once (`grok --trust`).
+
 ### Security
 
 - Hardened `.claude/hooks/deny-env-access.py` across target fields, scoped glob selectors, maps,
   lists, bounded shell reconstruction and patch target headers. Malformed envelopes now fail closed,
   while known prose and code fields remain writable.
-- Both Claude Code and Codex now route every tool name through the env guard. Existing Codex clones
-  must re-arm hook trust interactively because `.codex/hooks.json` changed.
-- Expanded `scripts/test-git-guard` from 132 to 196 assertions, including both host wiring files,
-  malformed envelopes and near-miss false-positive controls.
+- Claude Code, Codex and Grok Build now route every tool name through the env guard.
+- The env guard protects the key files in the primary checkout and in every linked worktree, and
+  fails closed on malformed `.git` metadata. Dot-segment globs are normalized before matching.
+  Quoted-delimiter heredoc bodies no longer false-deny, and a fail-closed deny carries a neutral
+  reason that says no protected path was matched.
+- Both hook adapters fail closed when the guard library cannot load, and the git guard now denies
+  invalid hook JSON instead of crashing open.
+- `.githooks/pre-push` sets `umask 022`, so the scan worktree's files are 0644 under any caller umask.
+
+### Changed
+
+- Guard logic moved to `scripts/lib/agent_guards`, with thin hook adapters under `.claude/hooks/`.
+  `scripts/test-git-guard` expanded from 132 to 414 assertions, including all three host wiring
+  files, malformed envelopes, near-miss false-positive controls and library-hook parity.
+- `research-doctrine` rebuilt as a self-routing assurance protocol: no Mode or Phase declaration,
+  atomic coverage, assurance classes L0-L3, and a Closure Ledger the producing context cannot raise
+  past `INCOMPLETE`. `skills/research-doctrine/README.md` and `references/agentic-harness.md` removed.
+- `scripts/repo-doctor`: a successful no-argument run is cached outside the repo, in
+  `~/.cache/operator-os-repo-doctor/`, behind a fingerprint of the tree, git state, environment,
+  interpreter and Codex user config. Any argument or change bypasses the cache; the new `--uncached`
+  flag forces a full scan. The tombstone scan prefilters on an ASCII anchor before regex work.
+- `CLAUDE.md`: required reads go through `scripts/read-context` with a context checklist; the
+  decision ledger is read through `scripts/ledger-index`; new rules for grounding recommendations,
+  ask before assert, verified absence and `eoc` closeout; the ratchet rule is replaced by fixing an
+  error class through single-sourcing the fact; the pre-send checklist gains the approval receipt and
+  the exact-bytes check.
+- The generated `AGENTS.md` names Codex and Grok Build as owning `/plan`.
+
+### Added
+
+- Grok Build host layer (`.grok/`: config, hooks, three agent views). See `.grok/README.md`.
+- `scripts/read-context`, a paged reader for tracked Markdown and text, and `scripts/ledger-index`,
+  a pointer index over `ai/DECISIONS.md` and `ai/ERRORS.md`.
+- `scripts/artifact-receipt-check`: approval and transition receipts that bind a send to the exact
+  bytes approved.
+- `scripts/agent-guard`, a CLI over the guard library.
+- `scripts/extract-pdf-text`, `scripts/transcribe-media`, `scripts/scan-transcript-loops` and
+  `scripts/llm-draft`.
+- `scripts/x-fetch` `--article`, `--include-replies` and `--via timeline|search`; `scripts/li-fetch`
+  batch requests, `--gate` and `--balance`.
+- Invoice generator: exact minor-unit arithmetic and currency validation before any output, and
+  `--check-data <data.json>` to validate without Chrome. Proposal data option `signatureLines: false`.
+- Skills: `run-coding-session` (repo baseline, task contract, fresh-context evaluation, opt-in net
+  line budget), `decision-gauntlet`, `call-debrief`, `deep-research`.
+- Verified-absence record validator (`skills/research-doctrine/scripts/validate_absence_records.py`)
+  and its fixture suite.
+- CI runs the new test suites.
+
+### Fixed
+
+- The invoice schedule now requires exactly one row flagged `current: true`.
 
 ## [2.2.0] - 2026-08-19
 

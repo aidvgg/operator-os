@@ -121,6 +121,10 @@ not the demo. One machine-specific case: if Codex has run on your machine but yo
 trusted this repo's `.codex/hooks.json`, a soft `codex-hooks-untrusted` line tells you how to arm
 it; it never appears where Codex has never run.
 
+**Grok Build.** Run `grok --trust` at the repo root once per machine, then `grok inspect` to
+confirm hooks and agents load. Until the folder is trusted, Grok skips `.grok/hooks/` and
+`.grok/agents/` silently. Details: `.grok/README.md`.
+
 The Python floor is 3.9. Every script here parses and runs on macOS's system `python3` (3.9.6);
 you do not need a newer one. The output above was measured on both 3.9.6 and a current 3.x.
 
@@ -141,7 +145,11 @@ guard, not isolation. If you would rather have background agents isolated, chang
 | The legacy `.docx` generators | `npm install docx` at the repo root |
 | Encrypted off-site backup | `rclone`, configured with a remote (`gdrive:Backups` by default, override with `OPERATOR_OS_BACKUP_REMOTE`), then `scripts/backup-sensitive --init` once to mint the Keychain passphrase. Every other mode reads that passphrase and fails loudly if it is missing. On Linux there is no Keychain: set `OPERATOR_OS_BACKUP_PASSPHRASE_FILE` to a 0600 file outside the repo (for example `~/.config/operator-os/backup-pass`), run `scripts/backup-sensitive --init` once with it set to mint the passphrase into that file, and use a cloud remote of your own; `--ask-pass` types the passphrase instead of reading any store. |
 | The unattended weekly backup | follow the INSTALL block at the top of `scripts/weekly-backup`. Step 2, the Full Disk Access grant, is not optional; the job dies without it. macOS only as shipped (launchd, Full Disk Access, `osascript`); on Linux schedule `scripts/weekly-backup --quiet` from cron with `OPERATOR_OS_BACKUP_PASSPHRASE_FILE` exported (the exact crontab line is in the NOT ON macOS block of that script's docstring), or a systemd timer running the same command. |
-| The agent-hands read tools | provider API keys in `.env.local`, see `.env.example`. These are paid third-party providers, and that plus your AI coding agent (a Claude Code subscription or API budget) and the cloud remote for backup is the whole running cost of this repo; nothing else phones home. |
+| The agent-hands read tools | provider API keys in `.env.local`, see `.env.example`. These are paid third-party providers, and that plus your AI coding agent (a Claude Code subscription or API budget) and the cloud remote for backup is the whole running cost of this repo; nothing else phones home except `scripts/transcribe-media`, which fetches its pinned speech engine and model on first use. |
+| Drafting through an outside model (`scripts/llm-draft`) | `KIMI_API_KEY` or `MOONSHOT_API_KEY` (kimi) or `DEEPSEEK_API_KEY` (deepseek) in `.env.local`, as the script's header documents. Agents never open `.env.example`, so read it yourself and add any of these names it does not list yet. Prompt text goes to the provider you pick. |
+| Media transcripts (`scripts/transcribe-media`, `scripts/scan-transcript-loops`) | An Apple Silicon Mac, `uv` (for `uvx`, which runs the pinned `mlx-whisper` engine) and `ffmpeg` (for `ffprobe`). No key: transcription runs locally. |
+| PDF text as evidence (`scripts/extract-pdf-text`) | poppler, the same install as `scripts/pdf-check`. |
+| A net-growth line budget on agent coding sessions | `python3 skills/run-coding-session/scripts/install_loc_budget.py`, run by you, never by an agent or onboarding (`--check` reports what is missing and changes nothing). It edits user-level files outside this repo (`~/.claude/CLAUDE.md`, `~/.claude/settings.json`, `~/.codex/AGENTS.md`, `~/.codex/hooks.json`), backing each up first, and the Codex hooks run only after you trust them in `/hooks`. |
 
 ---
 
@@ -273,7 +281,7 @@ control rather than editing the file.
   thing. Change all three in one pass and rerun `scripts/money` to prove the parser still reads
   your register.
 
-### 3d-bis. The one place your own name is functional, not prose
+### 3d-bis. The places your own name is functional, not prose
 
 `scripts/repo-doctor` bakes the operator's first name into a validation regex. The `sidecar-trace`
 check's `_ORIGIN_OK` accepts exactly four `scopeTrace` origin strings, two of which name the
@@ -283,8 +291,16 @@ proposal sidecar you write with your own name in the origin cell reports `sideca
 the documented vocabulary. Change the two `Sam` tokens there, and change the same vocabulary where
 it is documented in `skills/proposal-creator/references/data-schema.md`, in the same pass.
 
-Every other `Sam` in `scripts/` is prose or generated instruction text. Only these two are read by
-a regex, and this grep proves it on your own tree:
+`scripts/artifact-receipt-check` holds the second one: its `OPERATOR` constant (`OPERATOR = "Sam"`)
+is compared by equality with the `actor` of every approval receipt, so a receipt that names you is
+rejected until you change it. Change the constant, the `"actor"` example in the script's docstring,
+and the `"Sam"` fixtures in `scripts/test-artifact-receipt` in the same pass, then run
+`scripts/test-artifact-receipt`.
+
+Every other `Sam` in `scripts/` is prose or generated instruction text. This grep prints the two
+regex tokens in `repo-doctor` plus three receipt lines (the checker's docstring example and two
+fixtures) that match only because a quoted word such as `"actor"` ends in `r"`, and nothing else,
+on your own tree:
 
 ```bash
 grep -rn "Sam" scripts/ | grep -E "re\.(compile|search|match|sub|findall)|r\"|r'"
@@ -344,7 +360,7 @@ That regenerates every generated surface: the three agent entrypoints `AGENTS.md
 and `.github/copilot-instructions.md`, the two daily-log skill views, the three thin Claude
 commands `.claude/commands/standup.md`, `eod.md` and `weekly.md`, and one thin skill adapter per
 skill under both `.agents/skills/<name>/` and `.claude/skills/<name>/` (the `skill_adapters` rows in
-`ai/AGENT_ROUTES.json`; 56 surfaces in total as shipped). **Never hand-edit any of them.**
+`ai/AGENT_ROUTES.json`; 66 surfaces in total as shipped). **Never hand-edit any of them.**
 `repo-doctor` blocks a commit when they drift from what the generator would produce.
 `scripts/sync-agent-adapters --check` is the read-only version and prints
 `agent-adapters: clean (N generated surfaces)` when nothing has drifted, where N is the count of
@@ -533,6 +549,7 @@ Small scripts, each doing one job. They are the OS's reflexes.
 | Guardrail | When it runs | What it does |
 |---|---|---|
 | `scripts/repo-doctor --staged` | pre-commit | Blocks the commit on secrets, wire and credential shapes, protected-path writes, fake office files, expired pages, resurrected tombstoned values, stale generated views. |
+| `scripts/repo-doctor` (no arguments) | session start, on demand | The full check set, served from a fail-closed cache in `~/.cache/operator-os-repo-doctor/` when nothing it fingerprints has changed. `scripts/repo-doctor --uncached` - full scan that neither reads nor writes the startup cache. Any argument bypasses the cache. |
 | `scripts/repo-doctor` (range) | pre-push | The backstop a bypassed commit cannot outlive. Resolves what the remote actually holds with `git ls-remote`, then scans every transferred commit in a throwaway worktree. Blocks and names the offending sha. |
 | `scripts/horizon` | session start, the daily-log plan and `/weekly` modes | The deadline clock. Surfaces overdue items and anything due in the next 14 days from `**Due:**` tokens across the repo. |
 | `scripts/money` | after any invoice change | Cash rollup. Parses the register into `MONEY.md`: collected, outstanding, run-rate, concentration by owner. Fails loud on an unparseable row, a total that disagrees, or an open receivable with no armed `**Due:**` line. An **empty** register is not a failure: it exits 0 and writes a zeroed rollup that says so, so a `$0` here never has to be read as a broken parser. |
@@ -540,7 +557,8 @@ Small scripts, each doing one job. They are the OS's reflexes.
 | `scripts/pdf-check` / `scripts/docx-check` | inside the document skills | Proves a generated file is really that format, not renamed text, before you send it. |
 | `scripts/sync-agent-adapters` | after routing or contract changes | Regenerates the cross-model adapter views from one owner. |
 | `.claude/hooks/deny-env-access.py` | every tool call | Scans target fields, scoped selectors, lists, maps, bounded shell forms and patch target headers for a protected env-file target. Known prose and code fields stay writable; malformed envelopes fail closed. Keys are loaded by the wrapper scripts inside their own process. |
-| `.claude/hooks/deny-destructive-git.py` | every Bash tool call | Denies no-verify commits and pushes, sweep staging (`add -A`, bare-dot adds, `commit -a`), hard resets, forced cleans, worktree-discarding checkout, restore and switch forms, branch force-deletes and forced or deleting pushes. Plain push stays open because the commit protocol requires it. `scripts/test-git-guard` carries 196 assertions proving both guards and both host wiring files; run it after any edit to a guard or hook file. Both guards are wired for Codex in `.codex/hooks.json`, and Codex hook trust must be armed interactively before they run there. |
+| `.claude/hooks/deny-destructive-git.py` | every Bash tool call | Denies no-verify commits and pushes, sweep staging (`add -A`, bare-dot adds, `commit -a`), hard resets, forced cleans, worktree-discarding checkout, restore and switch forms, branch force-deletes and forced or deleting pushes. Plain push stays open because the commit protocol requires it. `scripts/test-git-guard` carries 414 assertions proving both guards and all three host wiring files; run it after any edit to a guard or hook file. Both guards are wired for Codex in `.codex/hooks.json` and for Grok Build in `.grok/hooks/guards.json`; Codex hook trust must be armed interactively, and Grok needs folder trust (`grok --trust`), before they run there. Both hooks are thin adapters over `scripts/lib/agent_guards` and print a fail-closed deny if it cannot load. |
+| `scripts/artifact-receipt-check` | before an authorized client-facing send, and after it | Validates the approval receipt by itself, then the approval and transition receipts together: schema, exact bytes (SHA-256) and transition consistency. It cannot authenticate the quoted approval or a provider reference, and a clean result authorizes nothing. |
 
 The env guard reads a tool-call envelope. That is a floor, not a fence: nested interpreters and
 external state can synthesize a protected path without placing a detectable spelling or resolving
@@ -639,10 +657,13 @@ a price-attack pass. Output -> `outputs/proposals/`. The shipped demo proposal P
 `outputs/proposals/` is regenerated with `TZ=UTC` in front of the generator command so its
 `CreationDate` carries no local timezone offset; do the same before committing any PDF you intend to
 publish (a client deliverable does not need it). Both generators require node and Google Chrome or
-Chromium; see the Requirements line in section 2.
+Chromium; see the Requirements line in section 2. For a PDF that will receive e-signature fields, set
+`signatureLines: false` in the proposal data to keep the signature labels and drop the drawn lines.
 
 **invoice-creator** - branded invoice as PDF. Always reads the next number from `INVOICE-LEDGER.md`,
-never guesses. Wire block from `PAYMENT-DETAILS.md` only. Output -> `outputs/invoices/`.
+never guesses. Wire block from `PAYMENT-DETAILS.md` only. Output -> `outputs/invoices/`. The
+generator refuses data whose amounts or currency do not add up; check a data file without Chrome
+with `node skills/invoice-creator/scripts/generate-invoice-html.js --check-data <data.json>`.
 
 **business-profile-creator** - read-and-merge update of your business profile JSON. Never blank-slate
 rebuilds.
@@ -650,8 +671,12 @@ rebuilds.
 **prospect-brief** - turns a prospect URL into a decision-ready brief against your qualification
 ladder in `outputs/outbound/prospect-gate.md`. No send authority.
 
-**research-doctrine** - phase-separated research discipline for decision-grade work. Read
-`skills/research-doctrine/OPERATOR-INTERNAL.md` alongside `SKILL.md` when running it in this repo.
+**research-doctrine** - self-routing research assurance protocol for decision-grade work (no mode or
+phase to declare). Read `skills/research-doctrine/OPERATOR-INTERNAL.md` alongside `SKILL.md` when
+running it in this repo.
+
+**deep-research** - scoped retrieval executor (3+ search angles, up to 15 sources, 3-vote claim
+verification); runs as a Phase B lane under research-doctrine.
 
 **hard-task** - the Tier-2 protocol for high-stakes work no skill covers. `/hard-task` in Claude
 Code, `$hard-task` in Codex; any other host reads `skills/hard-task/SKILL.md` and follows it.
@@ -664,6 +689,16 @@ identity interview, rebrand, demo wipe, verification with `scripts/repo-doctor`,
 and `scripts/horizon`, first commit, plain-English summary. It never asks for bank or wire values
 in the chat. `/onboard` in Claude Code, `$onboard` in Codex; any other host reads
 `skills/onboard/SKILL.md`.
+
+**decision-gauntlet** - chat-only stress test of an idea, plan, price or build, one question per
+turn. Writes nothing; ends with a non-authorizing `CHAT-ONLY SURVIVES`, `DIES` or `PARKED`.
+
+**call-debrief** - turns a call, transcript or recollection into eight evidence-bounded sections and
+routes durable facts and real commitments into their existing owner files. No transcript vault.
+
+**run-coding-session** - coding work in another repository, or a greenfield build: baseline first,
+a frozen task contract, executable gates, fresh-context evaluation. Its line budget is opt-in (see
+the optional table in section 2).
 
 **The vendored craft library** - 17 third-party reference skills for copy, page types, CRO, SEO and
 design-engineering. Reference tier: your doctrine, voice and pricing rules override anything they
@@ -691,8 +726,8 @@ mechanically where a check is possible.
 - **Error ledger.** Any mistake that reached you or a client gets one line in `ai/ERRORS.md` with
   the control that now prevents it. New rules must trace to a real entry there. No speculative
   process.
-- **Ratchet rule.** A session that fixes a class of problem ends by adding the check that makes that
-  class un-reintroducible. Cleanups without ratchets are rented, not owned.
+- **Fix error classes by single-sourcing.** Fix a recurring error class by single-sourcing the fact,
+  not by adding a rule.
 
 ### Upgrades
 
@@ -707,7 +742,8 @@ later. A config layer that separates identity from machinery is the intended fix
 ### Rhythm
 
 - **Session start:** the agent reads `CLAUDE.md`, then `knowledge/memory.md`, then the topic files
-  for the task, then `ai/DECISIONS.md` before anything decision-shaped. `horizon` surfaces what is due.
+  for the task, through `scripts/read-context`, then the decision ledger through `scripts/ledger-index`
+  before anything decision-shaped. `horizon` surfaces what is due.
 - **When you learn something durable** (a client, a price, a decision): it goes into `knowledge/`.
   Refine the existing line, do not append a parallel one. Let stale things die.
 - **A session that wrote `knowledge/`** ends with commit and push. Git is the backup and the audit

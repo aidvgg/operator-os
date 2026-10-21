@@ -41,7 +41,7 @@ CLAUDE_PLAN_EXCEPTION = {
 CODEX_PLAN_EXCEPTION = {
     "platform": "Codex and AGENTS.md-compatible agents",
     "alias": "/plan",
-    "reason": "Codex owns /plan as its built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log.",
+    "reason": "Codex and Grok Build own /plan as their built-in plan-mode command. Use a natural-language planning alias, or the daily-log skill, for the daily log.",
 }
 # Skills hosts read repository skills from .agents/skills (Codex) and .claude/skills (Claude Code).
 # Every skill lives in skills/<id>/ under CLAUDE.md's one-folder-per-skill rule, so it is surfaced
