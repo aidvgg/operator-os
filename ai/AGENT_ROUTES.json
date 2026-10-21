@@ -141,6 +141,21 @@
       ]
     }
   ],
+  "host_classes": {
+    "local_interactive": {
+      "examples": ["Claude Code", "Codex", "Grok Build"],
+      "writes": "direct_edits_pretooluse_githooks"
+    },
+    "remote": {
+      "examples": ["an always-on chat bot", "a scheduled cloud worker"],
+      "ops_doc": "knowledge/ops/remote-agent-hosts.md",
+      "bookkeeping": "scripts/agent-mutate",
+      "inbox_apply": "scripts/agent-apply-inbox",
+      "guard_lib": "scripts/lib/agent_guards",
+      "guard_cli": "scripts/agent-guard",
+      "doctor": "scripts/repo-doctor"
+    }
+  },
   "generated_surfaces": {
     "agent_entrypoints": [
       {

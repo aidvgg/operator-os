@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Apply an approved remote-agent inbox proposal through the mutate pipeline.
+
+Remotes write outputs/inbox/<bot>/<stamp>/{PROPOSAL.md,MANIFEST.json,patch.diff}
+and stop. They never run this script.
+
+The operator inspects the proposal, writes APPROVED containing
+the bundle_sha256 of those three files, then runs this from a TTY.
+
+Owner-file paths are allowed here. Env deny, protected-path doctor, and
+hooksPath still apply. Hash mismatch or a non-TTY refuses.
+
+Usage:
+  scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp> --print-hash
+  scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp>
+                            [--root REPO] [--no-pull] [--no-push] [--dry-run]
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT / "scripts" / "lib"))
+
+from agent_guards.mutate_pipeline import MutateError, run_pipeline  # noqa: E402
+
+BUNDLE_NAMES = ("PROPOSAL.md", "MANIFEST.json", "patch.diff")
+HASH_RE = re.compile(r"^bundle_sha256:\s*([0-9a-f]{64})\s*$", re.I)
+
+
+def bundle_sha256(inbox):
+    h = hashlib.sha256()
+    for name in BUNDLE_NAMES:
+        p = inbox / name
+        if not p.is_file():
+            raise MutateError("inbox-missing", "missing %s" % name)
+        data = p.read_bytes()
+        h.update(("%s\n%d\n" % (name, len(data))).encode("utf-8"))
+        h.update(data)
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def read_approved_hash(inbox):
+    approved = inbox / "APPROVED"
+    if not approved.is_file():
+        raise MutateError(
+            "not-approved",
+            "refusing apply without APPROVED (write bundle_sha256: <hex> after inspect)",
+        )
+    text = approved.read_text(encoding="utf-8")
+    found = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = HASH_RE.match(line)
+        if not m:
+            raise MutateError(
+                "not-approved",
+                "APPROVED must contain only 'bundle_sha256: <64-hex>' (comments with # ok)",
+            )
+        if found is not None:
+            raise MutateError("not-approved", "APPROVED has more than one bundle_sha256")
+        found = m.group(1).lower()
+    if found is None:
+        raise MutateError("not-approved", "APPROVED missing bundle_sha256")
+    return found
+
+
+def require_tty():
+    if not sys.stdin.isatty():
+        raise MutateError(
+            "not-a-tty",
+            "agent-apply-inbox is operator-at-the-keyboard in a real terminal; "
+            "remotes write the inbox and stop",
+        )
+
+
+def load_manifest(inbox):
+    try:
+        manifest = json.loads((inbox / "MANIFEST.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        raise MutateError("inbox-missing", "MANIFEST.json unreadable: %s" % e)
+    for key in ("bot", "skill", "mode", "paths", "message"):
+        if key not in manifest:
+            raise MutateError("inbox-missing", "MANIFEST.json missing %s" % key)
+    paths = manifest["paths"]
+    if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
+        raise MutateError("inbox-missing", "MANIFEST.json paths must be a non-empty string list")
+    return manifest
+
+
+def require_inbox_layout(cwd, inbox, bot):
+    root_inbox = (cwd / "outputs" / "inbox").resolve()
+    try:
+        rel = inbox.relative_to(root_inbox)
+    except ValueError:
+        raise MutateError(
+            "inbox-layout",
+            "inbox dir must be under outputs/inbox/<bot>/<stamp>/",
+        )
+    if len(rel.parts) != 2:
+        raise MutateError(
+            "inbox-layout",
+            "expected outputs/inbox/<bot>/<stamp>/, got outputs/inbox/%s" % rel,
+        )
+    if rel.parts[0] != str(bot):
+        raise MutateError(
+            "inbox-layout",
+            "directory bot %r must match MANIFEST bot %r" % (rel.parts[0], bot),
+        )
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="agent-apply-inbox")
+    ap.add_argument("inbox_dir")
+    ap.add_argument("--print-hash", action="store_true",
+                    help="print bundle_sha256 and exit; no TTY or APPROVED needed")
+    ap.add_argument("--root", default=str(_ROOT))
+    ap.add_argument("--no-pull", action="store_true")
+    ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+
+    cwd = Path(args.root).resolve()
+    inbox = Path(args.inbox_dir).resolve()
+    if not inbox.is_dir():
+        raise MutateError("inbox-missing", "not a directory: %s" % inbox)
+
+    digest = bundle_sha256(inbox)
+    if args.print_hash:
+        print(digest)
+        return 0
+
+    require_tty()
+    approved = read_approved_hash(inbox)
+    if approved != digest:
+        raise MutateError(
+            "hash-mismatch",
+            "APPROVED %s does not match current bundle %s; re-inspect" % (approved, digest),
+        )
+
+    manifest = load_manifest(inbox)
+    require_inbox_layout(cwd, inbox, manifest["bot"])
+    digest2 = bundle_sha256(inbox)
+    if digest2 != approved:
+        raise MutateError(
+            "hash-mismatch",
+            "bundle changed after APPROVED check (%s vs %s)" % (approved, digest2),
+        )
+
+    return run_pipeline(
+        cwd,
+        manifest["paths"],
+        inbox / "patch.diff",
+        str(manifest["message"]),
+        str(manifest["bot"]),
+        str(manifest["skill"]),
+        str(manifest["mode"]),
+        no_pull=args.no_pull,
+        no_push=args.no_push,
+        dry_run=args.dry_run,
+    )
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except MutateError as e:
+        sys.stderr.write("agent-apply-inbox: %s: %s\n" % (e.cls, e.detail))
+        sys.exit(1)

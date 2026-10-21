@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Bookkeeping mutate for remote agents: same outcome as a careful local session.
+
+Pipeline (fail closed; never --no-verify; never git add -A):
+  1. require a unified-diff --patch whose named files equal --paths
+  2. refuse unless listed paths and the rest of the tree are clean
+  3. git pull --ff-only (unless --no-pull)
+  4. require core.hooksPath=.githooks
+  5. env-scan every path, then skill write-license check
+  6. apply patch; restore files if anything later fails before commit
+  7. git add -- <explicit paths>
+  8. scripts/repo-doctor --staged (abort on HARD / non-zero)
+  9. git commit (hooks fire; no --no-verify)
+  10. git push unless --no-push (pre-push range doctor)
+  11. print receipt: sha, paths, doctor clean
+
+v1 write licenses (bookkeeping only; owner files use agent-apply-inbox):
+  daily-log - knowledge/ops/logbook/{LOGBOOK,STATS,HABITS}.md,
+              days/YYYY-MM-DD.md, reviews/YYYY-Www.md
+  prospect-brief - outputs/outbound/briefs/**
+
+Usage:
+  scripts/agent-mutate --bot Coding --skill daily-log --mode eod \
+    --paths knowledge/ops/logbook/HABITS.md --message "log: mark habit" \
+    --patch FILE [--root REPO] [--no-pull] [--no-push] [--dry-run]
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT / "scripts" / "lib"))
+
+from agent_guards.mutate_pipeline import (  # noqa: E402
+    MutateError,
+    env_scan_path,
+    normalize_path,
+    run_pipeline,
+)
+
+DAY_RE = re.compile(r"^knowledge/ops/logbook/days/\d{4}-\d{2}-\d{2}\.md$")
+REVIEW_RE = re.compile(r"^knowledge/ops/logbook/reviews/\d{4}-W\d{2}\.md$")
+BRIEF_RE = re.compile(r"^outputs/outbound/briefs/.+")
+
+DAILY_LOG_FIXED = {
+    "knowledge/ops/logbook/LOGBOOK.md",
+    "knowledge/ops/logbook/STATS.md",
+    "knowledge/ops/logbook/HABITS.md",
+}
+
+SKILL_IDS = {"daily-log", "prospect-brief"}
+
+
+def licensed(skill, path):
+    if skill == "daily-log":
+        return path in DAILY_LOG_FIXED or bool(DAY_RE.match(path)) or bool(REVIEW_RE.match(path))
+    if skill == "prospect-brief":
+        return bool(BRIEF_RE.match(path))
+    return False
+
+
+def parse_paths(items):
+    paths = []
+    for item in items:
+        for part in item.split(","):
+            part = part.strip()
+            if part:
+                paths.append(normalize_path(part))
+    return paths
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="agent-mutate")
+    ap.add_argument("--bot", required=True)
+    ap.add_argument("--skill", required=True, choices=sorted(SKILL_IDS))
+    ap.add_argument("--mode", required=True)
+    ap.add_argument("--paths", action="append", default=[], required=True)
+    ap.add_argument("--message", required=True)
+    ap.add_argument("--patch", required=True, help="unified diff; named files must equal --paths")
+    ap.add_argument("--root", default=str(_ROOT))
+    ap.add_argument("--no-pull", action="store_true")
+    ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+
+    cwd = Path(args.root).resolve()
+    if not (cwd / ".git").exists():
+        raise MutateError("not-a-repo", str(cwd))
+    if not (cwd / "scripts" / "agent-guard").is_file():
+        raise MutateError("missing-guard", "scripts/agent-guard not found")
+
+    paths = parse_paths(args.paths)
+    if not paths:
+        raise MutateError("usage", "require at least one --paths entry")
+
+    for p in paths:
+        env_scan_path(cwd, p)
+        if not licensed(args.skill, p):
+            raise MutateError("unlicensed-path", "%s not on %s write license" % (p, args.skill))
+
+    return run_pipeline(
+        cwd,
+        paths,
+        args.patch,
+        args.message,
+        args.bot,
+        args.skill,
+        args.mode,
+        no_pull=args.no_pull,
+        no_push=args.no_push,
+        dry_run=args.dry_run,
+    )
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except MutateError as e:
+        sys.stderr.write("agent-mutate: %s: %s\n" % (e.cls, e.detail))
+        sys.exit(1)

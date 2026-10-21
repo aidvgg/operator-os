@@ -22,6 +22,7 @@ still knows who its clients are, what they were charged, what was decided and wh
 | `outputs/invoices/` | Issued invoices. **Local-only, gitignored.** See the carve-outs below | `skills/invoice-creator` |
 | `outputs/content/` | X posts, LinkedIn posts, threads, seeds | Hand-written against `knowledge/voice/` |
 | `outputs/outbound/` | The prospect gate, per-prospect briefs, outbound drafts | `skills/prospect-brief` |
+| `outputs/inbox/` | Owner-file proposals from remote agent hosts, applied only by the operator | Remote hosts; `scripts/agent-apply-inbox` applies |
 | `outputs/research/` | Research runs, one folder per question | `skills/research-doctrine` |
 | `outputs/profiles/` | Business profiles for anyone who is not this business | `skills/business-profile-creator` |
 | `outputs/ops/` | Backup logs, machine notes, anything operational. **Local-only, gitignored** | Scripts and sessions |

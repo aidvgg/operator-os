@@ -674,6 +674,32 @@ def load_manifest(root, staged=False):
             raise ConfigError(
                 f"daily-log mode {mode_id} changed its compatibility platform exceptions"
             )
+    host_classes = data.get("host_classes")
+    if not isinstance(host_classes, dict) or "remote" not in host_classes:
+        raise ConfigError("host_classes.remote is required")
+    remote = host_classes["remote"]
+    if not isinstance(remote, dict):
+        raise ConfigError("host_classes.remote must be an object")
+    examples = remote.get("examples")
+    if not isinstance(examples, list) or not examples or not all(
+        isinstance(item, str) and item.strip() for item in examples
+    ):
+        raise ConfigError("host_classes.remote.examples must be a non-empty string list")
+    for key in ("ops_doc", "bookkeeping", "inbox_apply", "guard_lib", "guard_cli", "doctor"):
+        if not isinstance(remote.get(key), str) or not remote[key].strip():
+            raise ConfigError(f"host_classes.remote.{key} must be a non-empty string")
+    safe_rel(remote["ops_doc"], "host_classes.remote.ops_doc")
+    local = host_classes.get("local_interactive")
+    if local is not None:
+        if not isinstance(local, dict):
+            raise ConfigError("host_classes.local_interactive must be an object")
+        local_examples = local.get("examples")
+        if not isinstance(local_examples, list) or not local_examples or not all(
+            isinstance(item, str) and item.strip() for item in local_examples
+        ):
+            raise ConfigError(
+                "host_classes.local_interactive.examples must be a non-empty string list"
+            )
     return data
 
 
@@ -742,6 +768,26 @@ def skill_route_lines(manifest):
     return lines
 
 
+def render_remote_host_section(manifest):
+    remote = manifest["host_classes"]["remote"]
+    examples = " or ".join(remote["examples"])
+    return [
+        "",
+        "## Remote agents",
+        "",
+        (
+            f"A remote agent host that cannot load PreToolUse hooks (for example {examples}) "
+            f"writes bookkeeping only through `{remote['bookkeeping']}`, for licensed skill paths, "
+            f"with a required patch. Judgment or owner-file proposals land in `outputs/inbox/`; "
+            f"`{remote['inbox_apply']}` applies them only from a TTY after an APPROVED "
+            f"file whose bundle_sha256 matches the proposal, manifest, and patch. "
+            f"Remote hosts never run the apply script. Same deny and doctor entrypoints as local hooks "
+            f"(`{remote['guard_lib']}`, `{remote['guard_cli']}`, `{remote['doctor']}`). "
+            f"Owner: `{remote['ops_doc']}`."
+        ),
+    ]
+
+
 def render_agent_entrypoint(manifest, platform):
     contract = manifest["canonical_contract"]
     lines = [
@@ -775,6 +821,7 @@ def render_agent_entrypoint(manifest, platform):
         "",
     ])
     lines.extend(skill_route_lines(manifest))
+    lines.extend(render_remote_host_section(manifest))
     lines.extend([
         "",
         "## Maintenance",

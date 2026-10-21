@@ -3,7 +3,7 @@
 The operating machinery the business runs on, as opposed to what it sells (`knowledge/business/`),
 who it sells to (`knowledge/clients/`), or how it sounds (`knowledge/voice/`).
 
-Three things live here.
+Four things live here.
 
 `tools-and-stack.md` - the live tool stack and the **owner of the recurring cost lines**. Every
 number that leaves the account each month is written once, in that file. `scripts/money` keeps a
@@ -21,6 +21,10 @@ whether it is built or planned, and it arms no deadline by itself.
 holds per-day detail, `reviews/` the weekly retros, `HABITS.md` the tracked set. This is the
 accountability and stats layer, not a capture inbox: capture stays in the operator's task manager,
 and the acting agent writes the logbook rather than the operator maintaining a second list by hand.
+
+`remote-agent-hosts.md` - the owner of the remote agent host class: how a host that cannot load
+PreToolUse hooks writes through `scripts/agent-mutate` and the `outputs/inbox/` apply path, under
+the same guard library and doctor as a local session.
 
 ## What does not live here
 

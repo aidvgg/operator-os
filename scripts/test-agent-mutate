@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Negative + positive fixtures for remote write pipelines.
+
+Runs against a throwaway clone under /tmp. Invokes the LIVE checkout's
+scripts/agent-mutate and scripts/agent-apply-inbox with --root pointed at
+the clone so uncommitted script edits under test are still exercised.
+
+Exit 0 all green, 1 on any failure.
+"""
+from __future__ import annotations
+
+import os
+import pty
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MUTATE = ROOT / "scripts" / "agent-mutate"
+APPLY = ROOT / "scripts" / "agent-apply-inbox"
+GUARD = ROOT / "scripts" / "agent-guard"
+
+failures = []
+
+
+def note(ok, label, detail=""):
+    if ok:
+        print("  OK  %s" % label)
+    else:
+        failures.append(label)
+        print(" FAIL %s: %s" % (label, (detail or "")[:400]))
+
+
+def run(cmd, cwd=None):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def spawn_tty(cmd, cwd):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(str(cwd))
+        os.execv(cmd[0], cmd)
+    chunks = []
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        chunks.append(data)
+    _pid, status = os.waitpid(pid, 0)
+    text = b"".join(chunks).decode("utf-8", "replace")
+    if os.WIFEXITED(status):
+        code = os.WEXITSTATUS(status)
+    else:
+        code = 1
+    return code, text
+
+
+def clone_armed(tmp):
+    dest = tmp / "clone"
+    r = run(["git", "clone", "--local", str(ROOT), str(dest)])
+    if r.returncode != 0:
+        raise SystemExit("clone failed: %s" % r.stderr)
+    run(["git", "-C", str(dest), "config", "core.hooksPath", ".githooks"])
+    run(["git", "-C", str(dest), "remote", "remove", "origin"])
+    run(["git", "-C", str(dest), "config", "user.email", "agent-mutate-test@example.test"])
+    run(["git", "-C", str(dest), "config", "user.name", "agent-mutate-test"])
+    return dest
+
+
+def write_patch(clone, relpath, new_text, patch_path):
+    p = clone / relpath
+    orig = p.read_text(encoding="utf-8")
+    p.write_text(new_text, encoding="utf-8")
+    r = run(["git", "-C", str(clone), "diff", "--", relpath])
+    p.write_text(orig, encoding="utf-8")
+    if not r.stdout.strip():
+        raise SystemExit("empty patch for %s" % relpath)
+    patch_path.write_text(r.stdout, encoding="utf-8")
+
+
+def mutate(clone, extra, expect_fail_cls=None, skill="daily-log"):
+    cmd = [
+        sys.executable,
+        str(MUTATE),
+        "--bot",
+        "test",
+        "--skill",
+        skill,
+        "--mode",
+        "eod",
+        "--root",
+        str(clone),
+        "--no-pull",
+        "--no-push",
+        *extra,
+    ]
+    r = run(cmd, cwd=ROOT)
+    err = (r.stderr or "") + (r.stdout or "")
+    if expect_fail_cls:
+        ok = r.returncode != 0 and ("agent-mutate: %s:" % expect_fail_cls) in err
+        note(ok, "deny %s" % expect_fail_cls, err.strip())
+        return r, err
+    ok = r.returncode == 0 and "agent-mutate: receipt" in (r.stdout or "")
+    note(ok, "positive licensed commit", err.strip())
+    return r, err
+
+
+def apply_inbox(clone, inbox, extra=None, tty=True, expect_fail_cls=None):
+    cmd = [
+        sys.executable,
+        str(APPLY),
+        str(inbox),
+        "--root",
+        str(clone),
+        "--no-pull",
+        "--no-push",
+        *(extra or []),
+    ]
+    if tty:
+        code, text = spawn_tty(cmd, ROOT)
+    else:
+        r = run(cmd, cwd=ROOT)
+        code, text = r.returncode, (r.stderr or "") + (r.stdout or "")
+    if expect_fail_cls:
+        ok = code != 0 and ("agent-apply-inbox: %s:" % expect_fail_cls) in text
+        note(ok, "inbox deny %s" % expect_fail_cls, text.strip())
+        return code, text
+    ok = code == 0 and "agent-mutate: receipt" in text
+    note(ok, "positive inbox owner-file apply", text.strip())
+    return code, text
+
+
+def main():
+    print("test-agent-mutate:")
+    if not MUTATE.is_file() or not GUARD.is_file() or not APPLY.is_file():
+        print(" FAIL missing agent-mutate, agent-apply-inbox, or agent-guard")
+        return 1
+
+    with tempfile.TemporaryDirectory(prefix="agent-mutate-") as td:
+        tmp = Path(td)
+        clone = clone_armed(tmp)
+        habits = clone / "knowledge" / "ops" / "logbook" / "HABITS.md"
+        owner = clone / "knowledge" / "ops" / "remote-agent-hosts.md"
+        if not habits.is_file() or not owner.is_file():
+            print(" FAIL clone missing HABITS.md or remote-agent-hosts.md")
+            return 1
+        orig_habits = habits.read_text(encoding="utf-8")
+        orig_owner = owner.read_text(encoding="utf-8")
+
+        patch_unlic = tmp / "unlic.patch"
+        write_patch(clone, "CLAUDE.md",
+                    (clone / "CLAUDE.md").read_text(encoding="utf-8") + "\n",
+                    patch_unlic)
+        mutate(
+            clone,
+            ["--paths", "CLAUDE.md", "--message", "bad", "--patch", str(patch_unlic)],
+            expect_fail_cls="unlicensed-path",
+        )
+
+        broken = tmp / "nohooks"
+        run(["git", "clone", "--local", str(clone), str(broken)])
+        run(["git", "-C", str(broken), "config", "--unset-all", "core.hooksPath"])
+        patch_habits = tmp / "habits.patch"
+        write_patch(
+            clone,
+            "knowledge/ops/logbook/HABITS.md",
+            orig_habits + "\n<!-- agent-mutate fixture -->\n",
+            patch_habits,
+        )
+        mutate(
+            broken,
+            [
+                "--paths",
+                "knowledge/ops/logbook/HABITS.md",
+                "--message",
+                "bad",
+                "--patch",
+                str(patch_habits),
+            ],
+            expect_fail_cls="hooksPath",
+        )
+
+        mutate(
+            clone,
+            ["--paths", ".env", "--message", "bad", "--patch", str(patch_habits)],
+            expect_fail_cls="env-deny",
+        )
+
+        r = run([sys.executable, str(GUARD), "git", "--command", "git add -A"], cwd=ROOT)
+        note(r.returncode != 0, "agent-guard denies git add -A", (r.stderr or "")[:200])
+        r = run(
+            [sys.executable, str(GUARD), "git", "--command", "git commit --no-verify -m x"],
+            cwd=ROOT,
+        )
+        note(r.returncode != 0, "agent-guard denies --no-verify", (r.stderr or "")[:200])
+        r = run(
+            [sys.executable, str(GUARD), "env", "--path", ".env", "--root", str(clone)],
+            cwd=ROOT,
+        )
+        note(r.returncode != 0, "agent-guard denies .env path", (r.stderr or "")[:200])
+
+        mutate(
+            clone,
+            [
+                "--paths",
+                "knowledge/ops/logbook/HABITS.md",
+                "--message",
+                "bad",
+                "--patch",
+                str(tmp / "missing.patch"),
+            ],
+            expect_fail_cls="missing-patch",
+        )
+
+        (clone / "README.md").write_text(
+            (clone / "README.md").read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+        mutate(
+            clone,
+            [
+                "--paths",
+                "knowledge/ops/logbook/HABITS.md",
+                "--message",
+                "bad",
+                "--patch",
+                str(patch_habits),
+            ],
+            expect_fail_cls="dirty-tree",
+        )
+        run(["git", "-C", str(clone), "checkout", "--", "README.md"])
+
+        habits.write_text(orig_habits + "\nlocal dirty\n", encoding="utf-8")
+        mutate(
+            clone,
+            [
+                "--paths",
+                "knowledge/ops/logbook/HABITS.md",
+                "--message",
+                "bad",
+                "--patch",
+                str(patch_habits),
+            ],
+            expect_fail_cls="dirty-path",
+        )
+        habits.write_text(orig_habits, encoding="utf-8")
+
+        tomb_patch = tmp / "tomb.patch"
+        write_patch(
+            clone,
+            "knowledge/ops/logbook/HABITS.md",
+            orig_habits + "\n$3,250\n",
+            tomb_patch,
+        )
+        mutate(
+            clone,
+            [
+                "--paths",
+                "knowledge/ops/logbook/HABITS.md",
+                "--message",
+                "bad",
+                "--patch",
+                str(tomb_patch),
+            ],
+            expect_fail_cls="doctor-hard",
+        )
+        note(
+            habits.read_text(encoding="utf-8") == orig_habits,
+            "doctor-hard restores HABITS.md",
+            "worktree still dirty after doctor-hard",
+        )
+
+        mutate(
+            clone,
+            [
+                "--paths",
+                "knowledge/ops/logbook/HABITS.md",
+                "--message",
+                "test: agent-mutate positive fixture",
+                "--patch",
+                str(patch_habits),
+            ],
+            expect_fail_cls=None,
+        )
+
+        owner_patch = tmp / "owner.patch"
+        write_patch(
+            clone,
+            "knowledge/ops/remote-agent-hosts.md",
+            orig_owner + "\n<!-- inbox owner-file fixture -->\n",
+            owner_patch,
+        )
+        mutate(
+            clone,
+            [
+                "--paths",
+                "knowledge/ops/remote-agent-hosts.md",
+                "--message",
+                "bad",
+                "--patch",
+                str(owner_patch),
+            ],
+            expect_fail_cls="unlicensed-path",
+        )
+
+        stamp = clone / "outputs" / "inbox" / "testbot" / "20260911T000000Z"
+        stamp.mkdir(parents=True)
+        (stamp / "PROPOSAL.md").write_text("owner-file fixture\n", encoding="utf-8")
+        (stamp / "MANIFEST.json").write_text(
+            '{"bot":"testbot","skill":"inbox","mode":"owner",'
+            '"paths":["knowledge/ops/remote-agent-hosts.md"],'
+            '"message":"test: inbox owner-file apply"}\n',
+            encoding="utf-8",
+        )
+        (stamp / "patch.diff").write_text(
+            owner_patch.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        apply_inbox(clone, stamp, tty=False, expect_fail_cls="not-a-tty")
+
+        digest_r = run(
+            [sys.executable, str(APPLY), str(stamp), "--root", str(clone), "--print-hash"],
+            cwd=ROOT,
+        )
+        note(digest_r.returncode == 0 and len((digest_r.stdout or "").strip()) == 64,
+             "print-hash", digest_r.stderr or digest_r.stdout)
+        digest = (digest_r.stdout or "").strip()
+        (stamp / "APPROVED").write_text("bundle_sha256: %s\n" % ("0" * 64), encoding="utf-8")
+        apply_inbox(clone, stamp, tty=True, expect_fail_cls="hash-mismatch")
+        (stamp / "APPROVED").write_text("bundle_sha256: %s\n" % digest, encoding="utf-8")
+        apply_inbox(clone, stamp, tty=True, expect_fail_cls=None)
+        note(
+            "inbox owner-file fixture" in owner.read_text(encoding="utf-8"),
+            "inbox apply wrote owner file",
+            "remote-agent-hosts.md missing fixture marker",
+        )
+
+        (stamp / "patch.diff").write_text(
+            owner_patch.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+        apply_inbox(clone, stamp, tty=True, expect_fail_cls="hash-mismatch")
+
+    if failures:
+        print("test-agent-mutate: %d failure(s)" % len(failures))
+        return 1
+    print("test-agent-mutate: all green")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
