@@ -6,6 +6,11 @@ Usage:
   scripts/repo-doctor --staged     pre-commit mode (staged set; HARD checks plus a few soft
                                    lines that inform without blocking)
   scripts/repo-doctor --print-protected  print derived PROTECTED prefixes + names, exit 0
+  scripts/repo-doctor --uncached   full scan that neither reads nor writes the startup cache
+
+A successful no-argument run is memoized in ~/.cache/operator-os-repo-doctor/ behind a
+fingerprint of the tree, git state, environment, interpreter and host config
+(scripts/doctor_cache.py). Any argument, any fingerprint doubt, or any change bypasses it.
 
 Exit 1 on any HARD violation, 0 otherwise. Exit 2 = the scan itself broke (a git call
 failed); nothing was verified, so 2 must never be read as "clean". Never rewrites anything.
@@ -31,7 +36,8 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import date, timedelta
+from contextlib import redirect_stdout
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
@@ -2254,5 +2260,34 @@ def main() -> int:
     return 1 if hard else 0
 
 
+def _run():
+    # Any argument (--staged, --live-root=, --print-protected, --uncached) is a full scan
+    # that never touches the cache: only the plain local run is memoized.
+    if len(sys.argv) != 1:
+        return main()
+    try:
+        from doctor_cache import cache_path, fingerprint, read_cache, write_cache
+        environment = dict(os.environ)
+        cache_file = cache_path(ROOT, environment)
+        key = fingerprint(ROOT, environment, datetime.now())
+        cached = read_cache(cache_file, key)
+        if cached is not None and key is not None \
+                and key == fingerprint(ROOT, environment, datetime.now()):
+            sys.stdout.write(cached)
+            return 0
+    except Exception:
+        return main()
+    captured = io.StringIO()
+    try:
+        with redirect_stdout(captured):
+            result = main()
+    finally:
+        sys.stdout.write(captured.getvalue())
+    if result == 0 and key == fingerprint(ROOT, environment, datetime.now()) \
+            and not any(pattern.search(captured.getvalue()) for pattern in SECRET_PATTERNS):
+        write_cache(cache_file, key, captured.getvalue())
+    return result
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())

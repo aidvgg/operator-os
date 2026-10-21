@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""The warm doctor path must invalidate instead of hiding changed evidence."""
+import os
+import importlib.machinery
+import importlib.util
+import io
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from doctor_cache import fingerprint, cache_path, read_cache, write_cache
+
+DOCTOR = Path(__file__).with_name("repo-doctor")
+
+
+def git(root, *args):
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+
+class DoctorCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "repo"
+        self.root.mkdir()
+        git(self.root, "init", "-q")
+        git(self.root, "config", "user.name", "Test")
+        git(self.root, "config", "user.email", "test@example.test")
+        (self.root / "README.md").write_text("plain\n")
+        git(self.root, "add", "README.md")
+        git(self.root, "commit", "-qm", "init")
+        self.home = Path(self.temp.name) / "home"
+        self.home.mkdir()
+        (self.home / ".codex").mkdir()
+        (self.home / ".codex" / "config.toml").write_text("trusted = true\n")
+        self.env = {**os.environ, "HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex")}
+        self.now = datetime(2026, 9, 24, 12, 0, 0)
+
+    def fp(self, when=None):
+        return fingerprint(self.root, self.env, when or self.now)
+
+    def test_untracked_ignored_and_same_size_rewrite_invalidate(self):
+        first = self.fp()
+        self.assertIsNotNone(first)
+        (self.root / "knowledge").mkdir()
+        (self.root / "knowledge" / "note.md").write_text("new\n")
+        self.assertNotEqual(first, self.fp())
+        (self.root / "raw").mkdir()
+        (self.root / "raw" / "copy.md").write_text("one\n")
+        git(self.root, "config", "core.excludesfile", str(self.root / ".ignore-global"))
+        (self.root / ".ignore-global").write_text("raw/\n")
+        second = self.fp()
+        (self.root / "raw" / "copy.md").write_text("two\n")
+        self.assertNotEqual(second, self.fp())
+        path = self.root / "README.md"
+        old = path.stat()
+        third = self.fp()
+        path.write_text("PLAIN\n")
+        os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+        self.assertNotEqual(third, self.fp())
+
+    def test_untracked_send_markdown_invalidate(self):
+        first = self.fp()
+        draft = self.root / "outputs" / "outbound" / "email-draft.md"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("To: someone@example.test\n")
+        self.assertNotEqual(first, self.fp())
+        second = self.fp()
+        draft.write_text("To: another@example.test\n")
+        self.assertNotEqual(second, self.fp())
+
+    def test_head_index_mode_and_symlink_fail_closed(self):
+        first = self.fp()
+        git(self.root, "add", "README.md")
+        (self.root / "README.md").chmod(0o755)
+        self.assertNotEqual(first, self.fp())
+        git(self.root, "add", "README.md")
+        second = self.fp()
+        git(self.root, "commit", "-qm", "mode")
+        self.assertNotEqual(second, self.fp())
+        (self.root / "external-link").symlink_to(self.root / "README.md")
+        self.assertIsNone(self.fp())
+
+    def test_external_trust_git_config_date_and_age(self):
+        first = self.fp()
+        (self.home / ".codex" / "config.toml").write_text("trusted = nope\n")
+        self.assertNotEqual(first, self.fp())
+        second = self.fp()
+        git(self.root, "config", "core.hooksPath", ".githooks")
+        self.assertNotEqual(second, self.fp())
+        self.assertNotEqual(self.fp(), self.fp(self.now + timedelta(days=1)))
+        old = self.root / "knowledge" / "old.md"
+        old.parent.mkdir(exist_ok=True)
+        old.write_text("old\n")
+        age = (self.now - timedelta(days=7, seconds=1)).timestamp()
+        os.utime(old, (age, age))
+        before = self.fp(self.now - timedelta(seconds=2))
+        self.assertNotEqual(before, self.fp(self.now))
+
+    def test_git_info_exclude_changes_missing_markdown_verdict(self):
+        name = "missing-note.md"
+        self.assertEqual(1, subprocess.run(["git", "check-ignore", "-q", name],
+                                           cwd=self.root).returncode)
+        before = self.fp()
+        raw = git(self.root, "rev-parse", "--git-path", "info/exclude").stdout.strip()
+        info = Path(os.fsdecode(raw))
+        if not info.is_absolute():
+            info = self.root / info
+        info.write_text(info.read_text() + f"\n{name}\n")
+        self.assertEqual(0, subprocess.run(["git", "check-ignore", "-q", name],
+                                           cwd=self.root).returncode)
+        self.assertNotEqual(before, self.fp())
+
+    def test_global_excludes_change_missing_markdown_verdict(self):
+        name = "missing-note.md"
+        excludes = Path(self.temp.name) / "git-ignore"
+        excludes.write_text("nothing.md\n")
+        git(self.root, "config", "core.excludesfile", str(excludes))
+        before = self.fp()
+        excludes.write_text(f"{name}\n")
+        self.assertEqual(0, subprocess.run(["git", "check-ignore", "-q", name],
+                                           cwd=self.root).returncode)
+        self.assertNotEqual(before, self.fp())
+
+    def test_key_template_is_fingerprinted_and_live_key_files_are_not(self):
+        template = self.root / ".env.example"
+        template.write_text("EXAMPLE_API_KEY=\n")
+        git(self.root, "add", ".env.example")
+        first = self.fp()
+        self.assertIsNotNone(first)
+        template.write_text("EXAMPLE_API_KEY=placeholder\n")
+        self.assertNotEqual(first, self.fp())
+        live = self.root / ".env.local"
+        live.write_text("EXAMPLE_API_KEY=one\n")
+        second = self.fp()
+        live.write_text("EXAMPLE_API_KEY=two-longer\n")
+        self.assertEqual(second, self.fp())
+        git(self.root, "add", "-f", ".env.local")
+        self.assertIsNone(self.fp())
+
+    def test_corrupt_cache_is_miss_and_valid_cache_is_exact(self):
+        key = self.fp()
+        path = cache_path(self.root, self.env)
+        self.assertIsNotNone(path)
+        write_cache(path, key, "soft  one\nrepo-doctor: 1 soft warning(s), no hard violations\n")
+        expected = read_cache(path, key)
+        self.assertEqual(expected, "soft  one\nrepo-doctor: 1 soft warning(s), no hard violations\n")
+        path.write_text("{")
+        self.assertIsNone(read_cache(path, key))
+
+    def test_cache_directory_cannot_point_into_scanned_tree(self):
+        (self.home / ".cache").symlink_to(self.root)
+        self.assertIsNone(cache_path(self.root, self.env))
+
+    def test_symlinked_external_trust_falls_back(self):
+        trust = self.home / ".codex" / "config.toml"
+        other = self.home / "other.toml"
+        other.write_text("trusted = true\n")
+        trust.unlink()
+        trust.symlink_to(other)
+        self.assertIsNone(self.fp())
+
+    def test_only_no_argument_run_uses_cache(self):
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copy2(DOCTOR, scripts / "repo-doctor")
+        key = self.fp(datetime.now())  # the subprocess fingerprints with the real date
+        write_cache(cache_path(self.root, self.env), key, "repo-doctor: cached sentinel\n")
+
+        def run(*args):
+            return subprocess.run([sys.executable, str(DOCTOR), *args], cwd=self.root,
+                                  env=self.env, capture_output=True, text=True)
+
+        normal = run()
+        self.assertEqual((normal.returncode, normal.stdout), (0, "repo-doctor: cached sentinel\n"))
+        for args in (("--staged",), ("--print-protected",), ("--uncached",),
+                     (f"--live-root={self.root}",), ("--unknown-flag",)):
+            with self.subTest(args=args):
+                result = run(*args)
+                self.assertNotIn("cached sentinel", result.stdout)
+
+    def test_change_during_cache_read_forces_full_scan(self):
+        loader = importlib.machinery.SourceFileLoader("doctor_cache_race_test", str(DOCTOR))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        doctor = importlib.util.module_from_spec(spec)
+        loader.exec_module(doctor)
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["repo-doctor"]), \
+                mock.patch("doctor_cache.cache_path", return_value=self.home / "cache"), \
+                mock.patch("doctor_cache.fingerprint", side_effect=["before", "after", "after"]), \
+                mock.patch("doctor_cache.read_cache", return_value="repo-doctor: stale\n"), \
+                mock.patch.object(doctor, "main", side_effect=lambda: print("repo-doctor: fresh") or 0) as scan, \
+                redirect_stdout(output):
+            self.assertEqual(0, doctor._run())
+        scan.assert_called_once()
+        self.assertEqual("repo-doctor: fresh\n", output.getvalue())
+
+    def test_sensitive_finding_is_not_cached(self):
+        loader = importlib.machinery.SourceFileLoader("doctor_cache_sensitive_test", str(DOCTOR))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        doctor = importlib.util.module_from_spec(spec)
+        loader.exec_module(doctor)
+        fake_secret = "sk-" + "x" * 25
+
+        def scan():
+            print(f"soft  probe: {fake_secret}")
+            print("repo-doctor: 1 soft warning(s), no hard violations")
+            return 0
+
+        with mock.patch.object(sys, "argv", ["repo-doctor"]), \
+                mock.patch("doctor_cache.cache_path", return_value=self.home / "cache"), \
+                mock.patch("doctor_cache.fingerprint", return_value="same"), \
+                mock.patch("doctor_cache.read_cache", return_value=None), \
+                mock.patch("doctor_cache.write_cache") as store, \
+                mock.patch.object(doctor, "main", side_effect=scan), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(0, doctor._run())
+        store.assert_not_called()
+
+    def test_git_metadata_inputs_and_relative_excludes(self):
+        for name in ("info/sparse-checkout", "info/grafts", "shallow", "objects/info/alternates",
+                     "packed-refs", "MERGE_HEAD", "refs/replace/probe"):
+            with self.subTest(name=name):
+                raw = git(self.root, "rev-parse", "--git-path", name).stdout.strip()
+                path = Path(os.fsdecode(raw))
+                if not path.is_absolute():
+                    path = self.root / path
+                before = self.fp()
+                self.assertIsNotNone(before)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("changed\n")
+                self.assertNotEqual(before, self.fp())
+                path.unlink()
+        git(self.root, "config", "core.excludesFile", "relative-ignore")
+        self.assertIsNone(self.fp())
+
+    def test_private_cache_permissions_and_record_integrity(self):
+        key = self.fp()
+        path = cache_path(self.root, self.env)
+        output = "repo-doctor: clean\n"
+        write_cache(path, key, output)
+        valid = path.read_text()
+        for field, value in (("schema", -1), ("key", "other"), ("rc", 1),
+                             ("stdout", "repo-doctor: changed\n"), ("digest", "incorrect")):
+            with self.subTest(field=field):
+                data = json.loads(valid)
+                data[field] = value
+                path.write_text(json.dumps(data))
+                self.assertIsNone(read_cache(path, key))
+        path.write_text(valid)
+        for target in (path, path.parent):
+            with self.subTest(path=target.name):
+                previous = target.stat().st_mode
+                target.chmod(previous | 0o044)
+                self.assertIsNone(read_cache(path, key))
+                target.chmod(previous)
+        self.assertEqual(output, read_cache(path, key))
+
+    def test_failed_replace_preserves_previous_cache_and_cleans_temporary_files(self):
+        path = cache_path(self.root, self.env)
+        key = self.fp()
+        write_cache(path, key, "repo-doctor: before\n")
+        with mock.patch("doctor_cache.os.replace", side_effect=OSError("replace failed")):
+            write_cache(path, key, "repo-doctor: after\n")
+        self.assertEqual("repo-doctor: before\n", read_cache(path, key))
+        self.assertEqual([path], list(path.parent.iterdir()))
+
+    def test_tracked_exclusions_force_full_scan(self):
+        path = self.root / "node_modules" / "guard.py"
+        path.parent.mkdir()
+        path.write_text("print('fixture')\n")
+        git(self.root, "add", str(path))
+        self.assertIsNone(self.fp())
+
+    def test_external_dependency_directory_is_statted_without_traversal(self):
+        trust = self.home / ".codex" / "config.toml"
+        trust.unlink()
+        trust.mkdir()
+        (trust / "link").symlink_to(self.root / "README.md")
+        self.assertIsNotNone(self.fp())
+
+
+if __name__ == "__main__":
+    unittest.main()
