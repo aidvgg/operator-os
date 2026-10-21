@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""test-ledger-index - fixtures for scripts/ledger-index. Offline, temp dirs only.
+
+Usage:
+  python3 scripts/test-ledger-index
+"""
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parent / "ledger-index"
+DECISIONS = """# Decisions
+
+| Date | Decision | Falsifiable prediction | Review on | Outcome |
+|---|---|---|---|---|
+| 2026-09-19 | **ACME RETAIL CHANGE WAS CHARGED, NOT PASSED: $1,275 ON NET 7.** Long prose about the quote, with a `code | pipe` inside it. | Both invoices are paid by their Net 7 dates. | 2026-10-08 | |
+| 2026-08-01 | **A SETTLED RULING.** Prose. | It holds. | 2026-09-01 | Held, scored 2026-09-01 |
+| 2026-07-01 | A row with no bold headline at all, only plain prose that runs on for a while. | p | 2026-08-01 | ⏳ waiting on data |
+"""
+ERRORS = """# Errors
+
+| Date | Incident | Control that now prevents it |
+|---|---|---|
+| 2026-09-18 | **The bot told Sam his close did not land when it had.** Detail. | Instant callback answer. |
+
+## Hazards
+
+| Hazard | Control |
+|---|---|
+| Not a dated row | x |
+"""
+
+
+class TestLedgerIndex(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "ai").mkdir()
+        (self.root / "ai" / "DECISIONS.md").write_text(DECISIONS, encoding="utf-8")
+        (self.root / "ai" / "ERRORS.md").write_text(ERRORS, encoding="utf-8")
+
+    def run_it(self, *args):
+        run = subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.root)] + list(args),
+                             capture_output=True, text=True)
+        return run.returncode, run.stdout + run.stderr
+
+    def test_one_line_per_dated_row_with_title_review_and_outcome(self):
+        code, out = self.run_it()
+        self.assertEqual(code, 0)
+        self.assertIn("# ai/DECISIONS.md, 3 row(s)", out)
+        self.assertIn("2026-09-19 | ACME RETAIL CHANGE WAS CHARGED, NOT PASSED: $1,275 ON NET 7 | 2026-10-08 | open", out)
+        self.assertIn("2026-08-01 | A SETTLED RULING | 2026-09-01 | Held, scored 2026-09-01", out)
+        self.assertIn("2026-07-01 | A row with no bold headline at all", out)
+        self.assertIn("# ai/ERRORS.md, 1 row(s)", out)  # the hazards table is not a dated row
+        self.assertIn("2026-09-18 | The bot told Sam his close did not land when it had", out)
+        self.assertNotIn("Long prose", out)
+
+    def test_open_lists_only_unscored_decisions(self):
+        _code, out = self.run_it("--open")
+        self.assertIn("2 row(s), open only", out)
+        self.assertNotIn("A SETTLED RULING", out)
+        self.assertNotIn("ERRORS", out)
+
+    def test_grep_returns_whole_rows_that_hold_every_term(self):
+        _code, out = self.run_it("--grep", "net 7", "ACME")
+        self.assertIn("Long prose about the quote, with a `code | pipe` inside it.", out)
+        self.assertIn("1 row(s) hold: net 7 + acme", out)
+        _code, none = self.run_it("--grep", "nothing-like-this")
+        self.assertIn("0 row(s) hold", none)
+
+    def test_one_ledger_and_a_missing_file(self):
+        _code, out = self.run_it("errors")
+        self.assertNotIn("DECISIONS", out)
+        (self.root / "ai" / "ERRORS.md").unlink()
+        code, out = self.run_it()
+        self.assertNotEqual(code, 0)
+        self.assertIn("ai/ERRORS.md not found", out)
+
+    def test_help_states_source_order_and_and_terms(self):
+        code, out = self.run_it("--help")
+        self.assertEqual(code, 0)
+        self.assertIn("source order", out)
+        self.assertNotIn("newest first", out)
+        self.assertIn("every term", out)
+
+    def test_xx_date_stays_literal_and_retrievable(self):
+        path = self.root / "ai" / "ERRORS.md"
+        path.write_text(path.read_text(encoding="utf-8") +
+                        "| 2026-05-xx | **Duplicate invoice number NW-2026-104.** Recalled, not read. | Read the ledger. |\n",
+                        encoding="utf-8")
+        code, out = self.run_it("errors")
+        self.assertEqual(code, 0)
+        self.assertIn("2026-05-xx | Duplicate invoice number NW-2026-104", out)
+        self.assertNotIn("2026-05-01", out)
+        code, got = self.run_it("--grep", "Duplicate invoice")
+        self.assertEqual(code, 0)
+        self.assertIn("| 2026-05-xx | **Duplicate invoice number NW-2026-104.** Recalled, not read. | Read the ledger. |", got)
+        self.assertIn("1 row(s) hold: duplicate invoice", got)
+
+    def test_preamble_and_hazard_pointers_open_multiline_blocks(self):
+        (self.root / "ai" / "DECISIONS.md").write_text("""# Decisions
+
+Intro paragraph for the review-date rule.
+ALPHA-INTRO sits in the continuation.
+
+**Billing-date correction (Sam, 2026-08-25):** Acme Retail pays
+on the 7th. Token BETA-PAY.
+
+**SUPERSEDED - retired sales route.** Token GAMMA-LANE.
+
+| Date | Decision | Falsifiable prediction | Review on | Outcome |
+|---|---|---|---|---|
+| 2026-09-19 | **A ROW.** | p | 2026-10-01 | |
+| 2026-07-31 | **CROSS MODEL ADOPTED.** | p | 2026-08-28 | ❌ REOPENED 2026-09-18 by Sam |
+""", encoding="utf-8")
+        (self.root / "ai" / "ERRORS.md").write_text("""# Errors
+
+Every check traces to an incident or a hazard.
+
+| Date | Incident | Control that now prevents it |
+|---|---|---|
+| 2026-09-18 | **One incident.** | Control. |
+
+## Hazards
+
+- **`send-approval` (2026-08-30)** - explicit send approval
+  was not bound to exact artifact bytes.
+
+- **`other-hazard`** - unrelated note.
+""", encoding="utf-8")
+        code, out = self.run_it()
+        self.assertEqual(code, 0)
+        self.assertIn("ai/DECISIONS.md:3 | preamble | Intro paragraph for the review-date rule", out)
+        self.assertIn("ai/DECISIONS.md:6 | preamble | Billing-date correction (Sam, 2026-08-25)", out)
+        self.assertIn("ai/DECISIONS.md:9 | preamble | SUPERSEDED - retired sales route", out)
+        self.assertIn("ai/ERRORS.md:3 | preamble | Every check traces to an incident or a hazard", out)
+        self.assertIn("ai/ERRORS.md:11 | hazard | `send-approval` (2026-08-30)", out)
+        self.assertNotIn("BETA-PAY", out)
+        self.assertNotIn("GAMMA-LANE", out)
+        self.assertNotIn("ALPHA-INTRO", out)
+        self.assertNotIn("artifact bytes", out)
+        code, got = self.run_it("--grep", "send", "bytes")
+        self.assertEqual(code, 0)
+        self.assertIn("explicit send approval\n  was not bound to exact artifact bytes.", got)
+        self.assertNotIn("unrelated note", got)
+        self.assertIn("1 row(s) hold: send + bytes", got)
+        code, intro = self.run_it("--grep", "ALPHA-INTRO")
+        self.assertEqual(code, 0)
+        self.assertIn("Intro paragraph for the review-date rule.\nALPHA-INTRO sits in the continuation.", intro)
+        self.assertIn("1 row(s) hold: alpha-intro", intro)
+        code, opened = self.run_it("--at", "ai/DECISIONS.md:7")
+        self.assertEqual(code, 0)
+        self.assertIn("**Billing-date correction (Sam, 2026-08-25):** Acme Retail pays\non the 7th. Token BETA-PAY.", opened)
+        self.assertNotIn("GAMMA-LANE", opened)
+        code, open_out = self.run_it("--open")
+        self.assertIn("CROSS MODEL ADOPTED", open_out)
+        self.assertNotIn("Billing-date correction", open_out)
+        self.assertNotIn("ERRORS", open_out)
+
+    def test_mention_of_reopened_does_not_open_a_closed_outcome(self):
+        path = self.root / "ai" / "DECISIONS.md"
+        path.write_text(path.read_text(encoding="utf-8") +
+                        "| 2026-07-08 | **PRICE HELD.** | p | 2026-08-07 | ✅ CONFIRMED 2026-08-07: the price was not reopened. |\n",
+                        encoding="utf-8")
+        _code, out = self.run_it("--open")
+        self.assertNotIn("PRICE HELD", out)
+        self.assertNotIn("A SETTLED RULING", out)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

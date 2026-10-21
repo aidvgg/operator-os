@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Exercise pagination through the real CLI in disposable repositories.
+
+Breaks caught: omitted/repeated text, split UTF-8, unbounded output, stale continuations,
+out-of-range selection, a page size lost or rejected wrongly, and access outside the reader's
+public repository-text scope.
+"""
+import hashlib
+import json
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+SOURCE = Path(__file__).resolve().with_name("read-context")
+
+
+class ReaderTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(SOURCE.is_file(), "read-context CLI has not been implemented")
+        self.temp = tempfile.TemporaryDirectory(prefix="read-context-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "scripts").mkdir()
+        shutil.copyfile(SOURCE, self.root / "scripts/read-context")
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+
+    def fixture(self, name, content):
+        p = self.root / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+        subprocess.run(["git", "-C", str(self.root), "add", "--", name], check=True)
+        return p
+
+    def run_reader(self, *args):
+        return subprocess.run([sys.executable, str(self.root / "scripts/read-context"), *args],
+                              cwd="/", capture_output=True, timeout=5)
+
+    def page(self, *args):
+        result = self.run_reader(*args)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        limit = int(args[args.index("--page-bytes") + 1]) if "--page-bytes" in args else 6000
+        self.assertLessEqual(len(result.stdout), limit)
+        self.assertEqual(result.stderr, b"")
+        value = json.loads(result.stdout)
+        self.assertEqual(value["end_marker"], "END_CONTEXT_PAGE")
+        return value
+
+    def collect(self, path, *options):
+        args = [path, *options]
+        self.pages = 0
+        chunks = []
+        last_end = None
+        for _ in range(100):
+            page = self.page(*args)
+            self.pages += 1
+            start, end = page["bytes"]
+            if last_end is not None:
+                self.assertEqual(start, last_end, "pages must be contiguous")
+            content = page["content"].encode()
+            self.assertEqual(len(content), end - start)
+            self.assertEqual(page["sha256"], hashlib.sha256((self.root / path).read_bytes()).hexdigest())
+            chunks.append(content)
+            last_end = end
+            if page["next_command"] is None:
+                self.assertEqual(end, page["selection_bytes"][1])
+                return b"".join(chunks)
+            parts = shlex.split(page["next_command"])
+            self.assertEqual(parts[:2], ["python3", str(self.root / "scripts/read-context")])
+            args = parts[2:]
+        self.fail("pagination did not terminate")
+
+    def test_exact_reconstruction_with_long_lines_unicode_and_shell_metacharacters(self):
+        data = ('first\n' + '🧠é\\\"' * 3000 + '\r\nlast').encode()
+        name = "knowledge/a '$() `literal`.md"
+        self.fixture(name, data)
+        self.assertEqual(self.collect(name), data)
+
+    def test_page_size_bounds_output_and_survives_continuation(self):
+        data = ('line é🧠 "quoted"\n' * 4000).encode()
+        self.fixture("big.md", data)
+        self.assertEqual(self.collect("big.md"), data)
+        default_pages = self.pages
+        self.assertEqual(self.collect("big.md", "--page-bytes", "28000"), data)
+        self.assertLess(self.pages, default_pages)
+        self.assertGreater(self.pages, 1)
+        first = self.page("big.md", "--page-bytes", "28000")
+        self.assertGreater(len(first["content"].encode()), 6000)
+        self.assertIn("--page-bytes 28000", first["next_command"])
+        self.assertNotIn("--page-bytes", self.page("big.md")["next_command"])
+
+    def test_page_size_too_small_for_metadata_is_rejected(self):
+        self.fixture("note.md", b"text\n" * 100)
+        for size in ["0", "-5", "1023", "x"]:
+            with self.subTest(size=size):
+                r = self.run_reader("note.md", "--page-bytes", size)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(r.stdout, b"")
+                self.assertIn(b"--page-bytes", r.stderr)
+        name = "knowledge/" + "n" * 200 + "/" + "m" * 200 + ".md"
+        self.fixture(name, b"text\n" * 100)
+        r = self.run_reader(name, "--page-bytes", "1024")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, b"")
+        self.assertIn(b"use a larger size", r.stderr)
+
+    def test_selected_lines_use_inclusive_range_and_preserve_final_newline(self):
+        self.fixture("note.md", b"one\ntwo\nthree\nfour")
+        page = self.page("note.md", "--lines", "2:3")
+        self.assertEqual(page["lines"], [2, 3])
+        self.assertEqual(page["bytes"], [4, 14])
+        self.assertEqual(self.collect("note.md", "--lines", "2:3"), b"two\nthree\n")
+
+    def test_empty_file_is_explicitly_complete(self):
+        self.fixture("empty.md", b"")
+        page = self.page("empty.md")
+        self.assertEqual(page["bytes"], [0, 0])
+        self.assertEqual(page["lines"], [0, 0])
+        self.assertIsNone(page["next_command"])
+
+    def test_selected_long_lines_keep_selection_on_every_continuation(self):
+        selected = ("é" * 8000 + "\nlast selected\n").encode()
+        self.fixture("note.md", b"excluded first\n" + selected + b"excluded last\n")
+        self.assertEqual(self.collect("note.md", "--lines", "2:3"), selected)
+
+    def test_ignored_and_pathspec_lookalike_sources_are_not_read(self):
+        self.fixture("tracked.md", b"tracked")
+        self.fixture(".gitignore", b"ignored.md\n")
+        (self.root / "ignored.md").write_text("ignored")
+        subprocess.run(["git", "-C", str(self.root), "add", "-f", "--", "ignored.md"], check=True)
+        (self.root / "*.md").write_text("untracked wildcard filename")
+        for name in ["ignored.md", "*.md"]:
+            result = self.run_reader(name)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+
+    def test_invalid_utf8_has_no_partial_output(self):
+        self.fixture("invalid.md", b"first\n\xff")
+        result = self.run_reader("invalid.md")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+
+    def test_continuation_rejects_modified_source_before_printing_content(self):
+        p = self.fixture("note.md", b"first\n" * 3000)
+        page = self.page("note.md")
+        p.write_bytes(b"changed\n" * 3000)
+        args = shlex.split(page["next_command"])[2:]
+        result = self.run_reader(*args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"changed", result.stderr)
+
+    def test_invalid_ranges_and_unsigned_continuations_fail_closed(self):
+        self.fixture("note.md", "é\nlast".encode())
+        digest = hashlib.sha256("é\nlast".encode()).hexdigest()
+        for args in [("--lines", "0:1"), ("--lines", "2:1"), ("--lines", "1:9"),
+                     ("--start", "1", "--sha256", digest), ("--start", "3"),
+                     ("--start", "100", "--sha256", digest), ("--start", "-1")]:
+            with self.subTest(args=args):
+                r = self.run_reader("note.md", *args)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(r.stdout, b"")
+
+    def test_denies_untracked_quarantined_nontext_and_symlink_targets(self):
+        self.fixture("allowed.md", b"allowed")
+        self.fixture("raw/quarantine.md", b"quarantined")
+        self.fixture("personal/private.md", b"private")
+        self.fixture("not-text.bin", b"binary")
+        self.fixture("bad.md", b"bad\x00text")
+        (self.root / "untracked.md").write_text("not tracked")
+        (self.root / "alias.md").symlink_to(self.root / "allowed.md")
+        subprocess.run(["git", "-C", str(self.root), "add", "--", "alias.md"], check=True)
+        for name in ["untracked.md", "raw/quarantine.md", "personal/private.md", "not-text.bin",
+                     "bad.md", "alias.md", "../outside.md", "/etc/hosts", ".git/config"]:
+            with self.subTest(name=name):
+                r = self.run_reader(name)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(r.stdout, b"")
+
+
+if __name__ == "__main__":
+    unittest.main()
