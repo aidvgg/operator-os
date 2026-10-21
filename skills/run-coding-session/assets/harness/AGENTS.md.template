@@ -1,0 +1,26 @@
+# Agent entrypoint
+
+Read this map before acting. Follow the nearest nested agent instructions for any path you touch.
+
+## Context map
+
+- Product intent: `<product-record>`
+- Architecture and public boundaries: `<architecture-record>`
+- Quality invariants: `<quality-record>`
+- Current repository snapshot: `<baseline-record>`
+- Active work: `<active-task-location>`
+- Decisions: `<decision-record-or-ADR-location>`
+
+## Commands
+
+- Start: `<start-command>`
+- Unified check: `<check-command>`
+- User-level smoke test: `<smoke-command>`
+
+## Repository rules
+
+- Use repository artifacts as state; chat history is not authoritative.
+- Preserve pre-existing changes and stage explicit task-owned paths.
+- Change protected tests, public contracts, or architecture rules only through a recorded contract
+  revision.
+- Finish with green gates, recorded runtime evidence, and a recoverable checkpoint.

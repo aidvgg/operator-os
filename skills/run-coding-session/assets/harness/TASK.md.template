@@ -1,0 +1,60 @@
+# Task: <short outcome>
+
+- ID: `<stable id>`
+- Status: `DRAFT`
+- Baseline: `<path and captured commit>`
+- Base commit: `<commit>`
+- Risk: `LOW`, `MEDIUM`, or `HIGH`
+
+## Objective
+
+<One observable outcome.>
+
+## Non-goals
+
+- `<Explicit exclusion>`
+
+## Assumptions and unknowns
+
+- `<ASSUMED or UNKNOWN: statement and consequence>`
+
+## Invariants and protected surfaces
+
+- `<Architecture, security, API, schema, migration, test, or quality boundary>`
+
+## Affected surfaces
+
+<Domains, public interfaces, state, integrations, and likely paths.>
+
+## Acceptance contract
+
+| Criterion | Evidence | Initial state |
+|---|---|---|
+| `<Falsifiable behavior>` | `<test, journey, trace, metric, or inspection>` | `RED` or `UNKNOWN` |
+
+## Validation commands
+
+- `<narrow check>`
+- `<unified task gate>`
+- `<user-level smoke or end-to-end check>`
+
+## Rollback
+
+<How to return to the previous safe state, including data consequences.>
+
+## Progress and decisions
+
+| Time or commit | State | Evidence or decision |
+|---|---|---|
+| `<value>` | `<state>` | `<result>` |
+
+## Completion receipt
+
+- Accepted checkpoint: `the commit containing this receipt` or `<external checkpoint id>`
+- Unified gate: `<command and result>`
+- Runtime demonstration: `<artifact or result>`
+- Evaluator verdict: `PENDING`, `ACCEPT`, `REJECT`, or `SELF-VERIFIED`
+- Reconciled findings: `<list or none>`
+- Residual risk: `<list or none>`
+- Untested surfaces: `<list or none>`
+- Next action: `<exact next action or none>`

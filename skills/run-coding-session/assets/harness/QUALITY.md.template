@@ -1,0 +1,33 @@
+# Quality contract
+
+State project-specific invariants that can reject a change. Prefer executable checks and canonical
+examples over adjectives.
+
+## Correctness
+
+- Every changed behavior has acceptance evidence at the closest user-visible boundary.
+- Bug fixes reproduce the failure before implementation when a deterministic test is possible.
+- Protected acceptance tests change only through a recorded task-contract revision.
+
+## Architecture
+
+- `<Allowed dependency direction and its check>`
+- `<Boundary validation rule and its check>`
+
+## Maintainability
+
+- `<Project-specific rule that prevents a known bad pattern>`
+- `<Canonical implementation or anti-example path>`
+
+## Operations and security
+
+- `<Observability, failure, rollback, authorization, or data-handling invariant>`
+
+## Unified gate
+
+`<one command that composes the required project checks>`
+
+## Ratchet
+
+When a defect class escapes, add the smallest deterministic test, lint, fixture, example, or
+evaluator criterion that detects its recurrence.

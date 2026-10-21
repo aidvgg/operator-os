@@ -226,6 +226,20 @@
         "trigger": "Update the operator's business profile JSON by read-and-merge. Trigger on update the business profile, refresh the profile JSON. Reads the existing profile and memory.md before asking anything."
       },
       {
+        "path": ".agents/skills/call-debrief/SKILL.md",
+        "skill": "call-debrief",
+        "canonical_skill": "skills/call-debrief/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Extract a call, meeting, transcript, or recording notes into exactly eight evidence-bounded sections, then route durable facts and actual commitments to existing owners without creating a central transcript vault."
+      },
+      {
+        "path": ".claude/skills/call-debrief/SKILL.md",
+        "skill": "call-debrief",
+        "canonical_skill": "skills/call-debrief/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Extract a call, meeting, transcript, or recording notes into exactly eight evidence-bounded sections, then route durable facts and actual commitments to existing owners without creating a central transcript vault."
+      },
+      {
         "path": ".agents/skills/copy-editing/SKILL.md",
         "skill": "copy-editing",
         "canonical_skill": "skills/copy-editing/SKILL.md",
@@ -252,6 +266,20 @@
         "canonical_skill": "skills/copywriting/SKILL.md",
         "tier": "vendored",
         "trigger": "Write or rewrite marketing copy for a homepage, landing, pricing, feature, about, or product page. Trigger on write copy for, rewrite this page, headline help."
+      },
+      {
+        "path": ".agents/skills/decision-gauntlet/SKILL.md",
+        "skill": "decision-gauntlet",
+        "canonical_skill": "skills/decision-gauntlet/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Stress-test an idea, plan, price, build, or consequential choice in chat, one structured judgment question per turn, ending with a non-authorizing CHAT-ONLY SURVIVES, CHAT-ONLY DIES, or CHAT-ONLY PARKED recommendation."
+      },
+      {
+        "path": ".claude/skills/decision-gauntlet/SKILL.md",
+        "skill": "decision-gauntlet",
+        "canonical_skill": "skills/decision-gauntlet/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Stress-test an idea, plan, price, build, or consequential choice in chat, one structured judgment question per turn, ending with a non-authorizing CHAT-ONLY SURVIVES, CHAT-ONLY DIES, or CHAT-ONLY PARKED recommendation."
       },
       {
         "path": ".agents/skills/hard-task/SKILL.md",
@@ -448,6 +476,20 @@
         "canonical_skill": "skills/research-doctrine/SKILL.md",
         "tier": "first-party",
         "trigger": "Epistemic assurance for research, synthesis, validation, due diligence, and decisions. Trigger when external evidence, current facts, multiple sources, disputed claims, recommendations, or silent omissions could matter."
+      },
+      {
+        "path": ".agents/skills/run-coding-session/SKILL.md",
+        "skill": "run-coding-session",
+        "canonical_skill": "skills/run-coding-session/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Run coding work in another repository or initialize a greenfield software project. Baseline existing repos before questions, adapt the harness, freeze task contracts, and require executable gates plus fresh-context evaluation."
+      },
+      {
+        "path": ".claude/skills/run-coding-session/SKILL.md",
+        "skill": "run-coding-session",
+        "canonical_skill": "skills/run-coding-session/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Run coding work in another repository or initialize a greenfield software project. Baseline existing repos before questions, adapt the harness, freeze task contracts, and require executable gates plus fresh-context evaluation."
       },
       {
         "path": ".agents/skills/schema-markup/SKILL.md",

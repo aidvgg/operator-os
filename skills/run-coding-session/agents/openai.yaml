@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic Coding Session"
+  short_description: "Run rigorous long-horizon coding sessions"
+  default_prompt: "Use $run-coding-session to inspect the target repository, establish or refresh its baseline, and execute this coding task through verified completion."
