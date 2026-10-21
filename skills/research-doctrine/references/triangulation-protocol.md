@@ -1,93 +1,113 @@
-# Multi-Model Triangulation Protocol
+# Cross-Model Triangulation
 
-Some decisions are too high-stakes to trust to a single model's output, no matter how disciplined the doctrine. Triangulation is the procedure for running the same brief through multiple models and reconciling the deltas.
+Use this protocol to reach assurance class L3. Triangulation is independent error discovery and source reconciliation. It is not voting.
 
-One warning before the procedure: models trained on overlapping web text make correlated errors, and the errors that correlate most are widely-republished stale numbers. Cross-model agreement is therefore NOT evidence that a published fact is current. Triangulation earns its keep on judgment-bearing claims (is this niche viable, is this positioning defensible), and on surfacing deltas worth investigating. For any factual claim with a publisher, the arbiter is the source, never the vote.
+## Entry conditions
 
----
+Require all of the following:
 
-## When triangulation is required
+- one frozen Phase A brief
+- independently executed research passes
+- at least two materially different models or providers
+- inspected sources and claim registers from every eligible pass
+- a fresh reconciliation context that did not produce either synthesis
 
-The doctrine flags these decision classes as requiring triangulation before Phase E:
+A same-family subagent or second context may strengthen red-teaming, but does not create cross-model independence. An output without claim IDs, evidence locators, source fitness, and terminal states is ineligible until normalized and audited.
 
-- Revenue strategy decisions
-- Niche or vertical choice
-- Pricing changes
-- Build or scope decisions with material cost (per the brief's Stakes field)
-- Pivots away from current focus
+## Independent passes
 
-If your decision is in this class and you have not triangulated, the doctrine refuses to produce a Phase E artifact. One carve-out: in a non-interactive run where no second vendor is reachable, the run may proceed with the header line "TRIANGULATION: none, single-vendor" in the Phase E artifact and a one-point confidence penalty on every decision-critical claim. Everywhere a human can open a second model, the refusal stands.
+Give every model the exact same brief, scope, budgets, freshness horizons, and doctrine. Do not share another model's findings before its Phase D artifact is frozen. Record the exact model or provider identity available to the operator.
 
----
+Each pass must complete A through D and report its achieved assurance class and Closure Ledger status. A model can disagree with the expected answer without being correct; preserve its evidence, not its personality.
 
-## The procedure
+## Normalize the artifacts
 
-### Step 1: Approved brief
+Before comparing conclusions, create a union claim table:
 
-Take the Phase A artifact (the approved brief). Do not modify it. The same brief must go to every model. Modifying the brief between models invalidates the comparison.
+| Union ID | Model claim IDs | Normalized bounded claim | Source roots | Model states | Model certainty | Conflict |
+|---|---|---|---|---|---|---|
+| U1 | M1-B2, M2-B7 | ... | Root A, Root B | ... | ... | none |
 
-### Step 2: Run the brief through each model independently
+Normalize only semantically equivalent claims. Preserve scope, date, and definition differences as distinct claims.
 
-Open separate chats in:
+## Reconcile evidence roots
 
-- Claude (with the doctrine installed)
-- A second model, different vendor (with the doctrine installed via the README's system-prompt drop-in)
-- Optionally a third model for higher-stakes decisions (doctrine installed, same way)
+For each union claim:
 
-The doctrine must be installed in EVERY participating model. A vanilla model has never seen the phase definitions, the label set, or the confidence scale, and cannot produce a conformant artifact; its fluent, unlabeled output would otherwise be counted as an equal vote against disciplined output.
+1. inspect the strongest cited passage from every distinct root
+2. collapse repeated reporting of one root
+3. compare source fitness, freshness, and entailment
+4. search or return to B when a disagreement turns on missing evidence
+5. assign one reconciled terminal state and certainty
 
-Record each participant's exact model id. A same-family run (another instance, context, or subagent of the same vendor's model) never enters the agreement tally; log it as an extra red-team pass instead.
+Use these cross-model statuses:
 
-Run each independently through Phases B, C, and D. Save each Phase D artifact.
+- `AGREED, INDEPENDENT ROOTS`: models agree and cite at least two fit distinct roots
+- `AGREED, SAME ROOT`: models agree but repeat one root; no new corroboration
+- `SINGLETON, STRONGER EVIDENCE`: one model differs and has the fitter evidence
+- `SINGLETON, UNRESOLVED`: only one model makes the claim and evidence is insufficient
+- `CONTRADICTED`: fit evidence supports incompatible claims
+- `SCOPE MISMATCH`: apparent disagreement comes from different populations, dates, or definitions
 
-### Step 3: Open a reconciliation context
+At two models there is no majority. At three or more, a majority still cannot override stronger direct evidence. Source fitness adjudicates facts; model counts identify where to investigate.
 
-In a fresh context with the doctrine installed:
+## Reconcile reasoning
 
+After evidence reconciliation, compare:
+
+- requirements or sub-questions one model omitted
+- alternative explanations unique to one pass
+- assumptions and value judgments that differ
+- dependency paths and weakest premises
+- counter-cases and reversal conditions
+
+Create reconciled conclusion IDs and rebuild the dependency ledger from the reconciled claim table. Do not average confidence or prose conclusions.
+
+## Reconciliation artifact
+
+```markdown
+# [Title]: L3 Reconciliation
+
+## Participants
+
+| Pass | Model/provider | Brief identity | Prior class | Eligible |
+|---|---|---|---|---:|
+| M1 | ... | hash or exact title/date | L2 | yes |
+
+## Union claim table
+
+[Use the normalization schema above.]
+
+## Source-root audit
+
+| Union ID | Distinct roots | Strongest fit evidence | Cross-model status | Reconciled state | Certainty |
+|---|---:|---|---|---|---|
+| U1 | 2 | ... | AGREED, INDEPENDENT ROOTS | VERIFIED | HIGH |
+
+## Coverage deltas
+
+| Requirement, component, invariant, or Q ID | M1 | M2 | Reconciled treatment |
+|---|---|---|---|
+| Q1 | covered | omitted | restore and audit |
+
+## Reasoning deltas
+
+| Conclusion | Different assumptions or paths | Adjudication | Residual risk |
+|---|---|---|---|
+| ... | ... | ... | ... |
+
+## Reconciled dependency ledger
+
+[Every final conclusion linked to union claims, inferences, assumptions, and contradictions.]
+
+## L3 gate
+
+- Eligible independent passes: N
+- Union claims not source-audited: [none required, or IDs]
+- Requirements, atomic components, invariants, or sub-questions not reconciled: [none required, or IDs]
+- Contradictions not resolved or carried: [none required, or IDs]
+- Reconciled conclusions not dependency-traced: [none required, or IDs]
+- L3 reconciliation: COMPLETE | INCOMPLETE
 ```
-MODE: Critique
-PHASE: D-Stress-test (reconciliation)
 
-## Inputs
-[Each model's Phase D artifact, labeled by source and exact model id.]
-
-## Gate
-An input artifact lacking claim labels, source URLs, and confidence ratings is rejected from reconciliation, not reconciled. An unlabeled claim cannot count as agreement or dissent.
-
-## Reconciliation instructions
-
-Reconcile at claim-plus-source granularity. Each artifact's claim table (claim, label, tier, source URL, dates, confidence) is the input, not its prose conclusions.
-
-For N participating models, sort claims into:
-1. Unanimous (N of N), citing DIFFERENT independently verifiable sources - treat as corroborated
-2. Unanimous or majority, citing the SAME source - one source, not corroboration; verify that source
-3. Majority (only meaningful when N is 3 or more) - investigate the dissent before scoring it
-4. Singleton (one model only) - "uncorroborated, investigate": open the cited source and adjudicate on evidence
-5. Contradicted across models - unresolved; adjudicate at the source, never by averaging
-
-At N=2 the tiers are: agreed / singleton / contradicted. There is no majority tier; do not manufacture one.
-
-A singleton backed by a verifiable P1 source outranks a unanimous claim with no primary. Agreement is never evidence of currency for a published fact: check the source's own date against the freshness horizon regardless of the vote.
-
-Output a reconciled claim table where every claim carries its cross-model status AND its strongest source with tier and date.
-```
-
-### Step 4: Use the reconciled synthesis as Phase D input for Phase E
-
-The decision in Phase E rests on the reconciled output, not any single model's view.
-
----
-
-## Why this matters
-
-Different models have different sycophancy patterns and different default biases, and when they search they sometimes reach different sources. That last part is the real value: a second vendor adds evidence mainly by reaching pages the first one didn't, not by holding a different opinion.
-
-Disagreement between models is not a problem to resolve by averaging - it is a signal to investigate. The disagreement often points at exactly the area where the underlying question is genuinely uncertain.
-
----
-
-## What this is not
-
-Triangulation is not "use the model that agrees with you most." It is not "average the outputs." It is not "pick the cleanest answer." And agreement is not verification: two models repeating the same stale figure from the same training corpus is one error with two voices.
-
-It is structured cross-model adversarial review at the claim-and-source level. The protocol exists because no single model - including the one running this doctrine - is reliable enough on its own for high-stakes decisions.
+Only a complete reconciliation supports class L3 and `TRIANGULATED` status. If one model or source set is unavailable, report the strongest lower class achieved rather than treating triangulation as complete.

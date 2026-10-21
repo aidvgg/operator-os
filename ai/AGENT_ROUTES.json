@@ -282,6 +282,20 @@
         "trigger": "Stress-test an idea, plan, price, build, or consequential choice in chat, one structured judgment question per turn, ending with a non-authorizing CHAT-ONLY SURVIVES, CHAT-ONLY DIES, or CHAT-ONLY PARKED recommendation."
       },
       {
+        "path": ".agents/skills/deep-research/SKILL.md",
+        "skill": "deep-research",
+        "canonical_skill": "skills/deep-research/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Deep research executor for evidence-backed decision support with scoped web search and adversarial verification."
+      },
+      {
+        "path": ".claude/skills/deep-research/SKILL.md",
+        "skill": "deep-research",
+        "canonical_skill": "skills/deep-research/SKILL.md",
+        "tier": "first-party",
+        "trigger": "Deep research executor for evidence-backed decision support with scoped web search and adversarial verification."
+      },
+      {
         "path": ".agents/skills/hard-task/SKILL.md",
         "skill": "hard-task",
         "canonical_skill": "skills/hard-task/SKILL.md",

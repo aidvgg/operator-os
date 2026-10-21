@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Deterministic fixtures for the research-doctrine absence validator."""
+
+from __future__ import annotations
+
+import copy
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+VALIDATOR = ROOT / "skills/research-doctrine/scripts/validate_absence_records.py"
+RECORD = {
+    "absence_id": "A1", "q_ids": ["Q1"], "component_ids": ["R1.b"],
+    "corpus_or_paths": ["policy/current/", "policy/archive/2025/"],
+    "terms_and_synonyms": {"terms": ["automatic renewal"], "synonyms": ["auto-renewal"]},
+    "search_date": "2026-08-30",
+    "tool_or_method": {
+        "tool": {"kind": "EXECUTABLE", "identity": "ripgrep 14.1.1"},
+        "procedure": "SEARCH_THEN_INSPECT_ALL_MATCHES",
+        "parameters": {
+            "terms_and_synonyms": {"terms": ["automatic renewal"], "synonyms": ["auto-renewal"]},
+            "corpus_or_paths": ["policy/current/", "policy/archive/2025/"],
+            "options": ["CASE_INSENSITIVE", "FIXED_STRING", "RECURSIVE"],
+        },
+        "completion": {"declared_count": 42, "inspected_count": 42, "blocked_count": 0, "match_count": 0},
+    },
+    "inspected_count": 42, "retrieval_status": "COMPLETE",
+    "scoped_result": {"outcome": "NOT_FOUND", "inspected_count": 42, "corpus_or_paths": ["policy/current/", "policy/archive/2025/"]},
+    "consequence": {"mode": "BOUNDED_ABSENCE", "component_ids": ["R1.b"], "corpus_or_paths": ["policy/current/", "policy/archive/2025/"]},
+}
+
+LEGACY_METHOD_PROSE = (
+    "Search was blocked with no source access despite repeated retrieval",
+    "Search reached a dead source and could not inspect its body",
+    "Search failed while retrieving the declared source corpus",
+    "Search found the source inaccessible during manual inspection",
+    "Search ended in timeout before corpus inspection was complete",
+    "Search returned HTTP 403 before inspecting the declared records",
+    "Search received response code 403 while opening declared paths",
+    "Search stopped at a sign-in wall before inspecting sources",
+    "Search stopped after permission denied on one declared path",
+    "Search stopped when rate-limited by the source endpoint",
+    "Search stopped after connection refused by the source host",
+    "Search stopped after DNS resolution failure for the host",
+    "Search stopped at a CAPTCHA before source inspection",
+    "Search inspected only a partial response from the endpoint",
+    "Search inspected a truncated payload from the endpoint",
+    "Search received an empty response from the endpoint",
+    "Search could inspect just 10 of the 42 declared files",
+    "Search could not inspect all declared files",
+    "Search inspected a not-all declared corpus",
+    "Search inspected 10 out of 42 declared files before stopping",
+    "Search was redirected to sign in before inspecting source records",
+    "Search hit an authentication wall before inspecting source records",
+    "Search the cached index after the origin server answered with 403",
+    "Search every accessible file and inspect matches; one declared file would not open",
+    "Search found three matching clauses and inspect every returned hit",
+)
+LEGACY_CONSEQUENCE_PROSE = (
+    "The clause does not exist.", "Within the inspected records, zero matching clauses exist anywhere.",
+    "Treat R1.b as absent in all corpora.", "Treat R1.b as nonexistent across every path.",
+    "Treat R1.b as missing from any boundary.", "Treat R1.b as globally absent.",
+    "Treat R1.b as absent beyond the inspected corpus.", "Treat R1.b as absent without limitation.",
+    "Treat R1.b as not present in any corpus.", "Treat R1.b as omitted from all records.",
+    "Treat R1.b as nowhere present.", "Three matching clauses were found in the declared corpus.",
+    "Automatic renewal is undocumented company-wide.",
+)
+
+
+class Tests(unittest.TestCase):
+    def run_validator(self, payload: object) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "record.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return subprocess.run(["python3", str(VALIDATOR), str(path)], capture_output=True, text=True, check=False)
+
+    def invalid(self, payload: object, text: str) -> None:
+        result = self.run_validator(payload)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(text, result.stderr)
+
+    def test_valid_automated_and_manual_records(self) -> None:
+        self.assertEqual(self.run_validator(RECORD).returncode, 0)
+        for mode in ("BOUNDED_ABSENCE", "UNKNOWN", "NO_DURABLE_CLAIM", "QUESTION_OPEN"):
+            record = copy.deepcopy(RECORD)
+            record["tool_or_method"]["tool"] = {"kind": "MANUAL", "identity": "manual review"}
+            record["tool_or_method"]["procedure"] = "MANUAL_REVIEW_ALL_DECLARED_ITEMS"
+            record["tool_or_method"]["parameters"]["options"] = ["LINE_BY_LINE"]
+            record["consequence"]["mode"] = mode
+            self.assertEqual(self.run_validator(record).returncode, 0)
+
+    def test_required_and_closed_top_level(self) -> None:
+        for field in RECORD:
+            record = copy.deepcopy(RECORD); del record[field]
+            self.invalid(record, f"missing required field '{field}'")
+        record = copy.deepcopy(RECORD); record["extra"] = 1
+        self.invalid(record, "unexpected top-level fields")
+
+    def test_core_field_boundaries(self) -> None:
+        for field, value in (("q_ids", []), ("component_ids", []), ("corpus_or_paths", []),
+                             ("terms_and_synonyms", {"terms": [], "synonyms": []}),
+                             ("search_date", "2026-02-30"), ("inspected_count", 0)):
+            record = copy.deepcopy(RECORD); record[field] = value
+            self.assertEqual(self.run_validator(record).returncode, 1)
+        self.invalid([RECORD, copy.deepcopy(RECORD)], "duplicate absence_id")
+
+    def test_corpus_boundaries_are_specific_and_non_glob(self) -> None:
+        invalid_boundaries = (
+            "*", "/", "//", ".", "..", "./", "../", "/./", "/../", "C:\\",
+            "file:", "file:/", "file://", "file:///", "file:////", "file://localhost", "file://localhost/", "file://localhost///",
+            "file:///#root", "file://localhost/#root", "file:////localhost/", "file:////localhost/#root",
+            "file:///?resource=/srv/policy", "file://localhost/?resource=/srv/policy",
+            "file://///#root", "file:///%2F#root", "file://localhost/%2F#root",
+            "file:///srv/%2e/policy", "file:///srv/%2e%2e/policy", "file:///srv/%ZZ/policy", "file:////server/",
+            "file:///C:/", "file://localhost/C:/", "file:///%43%3A/",
+            "policy/./current", "policy/../current", "policy/current/...", "policy/**/*.md",
+            "all", "every", "any", "corpus", "file", "all corpora", "every path", "any record",
+            "all websites", "every website", "any website", "everything", "everywhere", "whole",
+            "entire", "global", "globally", "universal", "world", "worldwide", "world-wide",
+            "internet", "internet-wide", "web", "whole world", "whole internet", "company-wide",
+            "org-wide", "organization-wide", "enterprise-wide", "the entire corpus", "the entire internet", "the entire world",
+        )
+        for boundary in invalid_boundaries:
+            with self.subTest(boundary=boundary):
+                record = copy.deepcopy(RECORD)
+                record["corpus_or_paths"] = [boundary]
+                record["tool_or_method"]["parameters"]["corpus_or_paths"] = [boundary]
+                record["scoped_result"]["corpus_or_paths"] = [boundary]
+                record["consequence"]["corpus_or_paths"] = [boundary]
+                self.invalid(record, "specific bounded names or paths")
+        record = copy.deepcopy(RECORD)
+        record["corpus_or_paths"] = [
+            "policy/current/", "/srv/research/policy", "file:///srv/research/policy",
+            "file://localhost/srv/research/policy", "file:///srv/research/policy?revision=2025#section",
+            "file://localhost/srv/research/policy#section", "file:////server/share/policy",
+            "file:///C:/Windows/System32",
+            "named-corpus-2025", "Client policy archive",
+            "World Bank policy archive 2025", "Web Standards records 2025",
+            "Global Payments policy set 2025", "Internet Society policy archive 2025",
+        ]
+        record["tool_or_method"]["parameters"]["corpus_or_paths"] = record["corpus_or_paths"]
+        record["scoped_result"]["corpus_or_paths"] = record["corpus_or_paths"]
+        record["consequence"]["corpus_or_paths"] = record["corpus_or_paths"]
+        self.assertEqual(self.run_validator(record).returncode, 0)
+        record = copy.deepcopy(RECORD)
+        record["corpus_or_paths"] = ["policy/current/", "policy/current/"]
+        record["tool_or_method"]["parameters"]["corpus_or_paths"] = record["corpus_or_paths"]
+        record["scoped_result"]["corpus_or_paths"] = record["corpus_or_paths"]
+        record["consequence"]["corpus_or_paths"] = record["corpus_or_paths"]
+        self.invalid(record, "corpus_or_paths must contain unique boundaries")
+
+    def test_method_closed_shape_and_tool_identity(self) -> None:
+        self.invalid({**copy.deepcopy(RECORD), "tool_or_method": "legacy"}, "tool_or_method must contain only")
+        for field in ("tool", "procedure", "parameters", "completion"):
+            record = copy.deepcopy(RECORD); del record["tool_or_method"][field]
+            self.invalid(record, "tool_or_method must contain only")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["extra"] = 1
+        self.invalid(record, "tool_or_method must contain only")
+        for field, value, message in (
+            ("tool", 1, "tool must contain only"),
+            ("procedure", [], "controlled procedure enum"),
+            ("parameters", "recursive", "parameters must contain only"),
+            ("completion", [], "completion must contain only"),
+        ):
+            record = copy.deepcopy(RECORD); record["tool_or_method"][field] = value
+            self.invalid(record, message)
+        for field in ("kind", "identity"):
+            record = copy.deepcopy(RECORD); del record["tool_or_method"]["tool"][field]
+            self.invalid(record, "tool must contain only")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["tool"]["extra"] = 1
+        self.invalid(record, "tool must contain only")
+        for kind in ("BROWSER", [], 1):
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["tool"]["kind"] = kind
+            self.invalid(record, "kind must be EXECUTABLE or MANUAL")
+        for identity in ("browser search", "rg", "rg 1.2", "use /opt/search.py recursively", "/tmp/report.txt", []):
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["tool"]["identity"] = identity
+            self.invalid(record, "closed executable form")
+        for identity in ("ripgrep 14.1.1", "search-tool v2.0.0-beta.1", "/opt/research/search.py", "scripts/audit-search.sh", "audit-search.sh"):
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["tool"]["identity"] = identity
+            self.assertEqual(self.run_validator(record).returncode, 0)
+        record = copy.deepcopy(RECORD)
+        record["tool_or_method"]["tool"] = {"kind": "MANUAL", "identity": "human review"}
+        self.invalid(record, "MANUAL tool identity must be manual review")
+
+    def test_tool_kind_and_procedure_are_cross_bound(self) -> None:
+        record = copy.deepcopy(RECORD)
+        record["tool_or_method"]["tool"] = {"kind": "MANUAL", "identity": "manual review"}
+        self.invalid(record, "MANUAL tool requires MANUAL_REVIEW_ALL_DECLARED_ITEMS")
+        record = copy.deepcopy(RECORD)
+        record["tool_or_method"]["procedure"] = "MANUAL_REVIEW_ALL_DECLARED_ITEMS"
+        self.invalid(record, "EXECUTABLE tool requires SEARCH_THEN_INSPECT_ALL_MATCHES")
+
+    def test_procedure_enum_rejects_all_legacy_prose(self) -> None:
+        for procedure in LEGACY_METHOD_PROSE:
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["procedure"] = procedure
+            self.invalid(record, "controlled procedure enum")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["procedure"] = "UNKNOWN"
+        self.invalid(record, "controlled procedure enum")
+
+    def test_parameters_are_closed_mirrors_with_controlled_options(self) -> None:
+        legacy_parameters = (
+            ["HTTP 403"], {"result_output": "three matches found"},
+            {"failure": "blocked"}, {"coverage": "10 out of 42"},
+        )
+        for parameters in legacy_parameters:
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["parameters"] = parameters
+            self.invalid(record, "parameters must contain only")
+        for field in ("terms_and_synonyms", "corpus_or_paths", "options"):
+            record = copy.deepcopy(RECORD); del record["tool_or_method"]["parameters"][field]
+            self.invalid(record, "parameters must contain only")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["parameters"]["extra"] = 1
+        self.invalid(record, "parameters must contain only")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["parameters"]["terms_and_synonyms"] = {"terms": ["other"], "synonyms": []}
+        self.invalid(record, "parameters.terms_and_synonyms must exactly equal")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["parameters"]["corpus_or_paths"] = ["other/"]
+        self.invalid(record, "parameters.corpus_or_paths must exactly equal")
+        for options in ([], ["UNKNOWN"], ["RECURSIVE", "RECURSIVE"], "RECURSIVE", [True]):
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["parameters"]["options"] = options
+            self.invalid(record, "unique nonempty controlled enum list")
+        record = copy.deepcopy(RECORD)
+        record["tool_or_method"]["parameters"]["options"].append("LINE_BY_LINE")
+        self.invalid(record, "EXECUTABLE tool options must not include LINE_BY_LINE")
+        for options, message in (
+            (["FIXED_STRING", "RECURSIVE"], "exactly one case mode"),
+            (["CASE_INSENSITIVE", "RECURSIVE"], "exactly one match mode"),
+            (["CASE_INSENSITIVE", "CASE_SENSITIVE", "FIXED_STRING"], "exactly one case mode"),
+            (["CASE_INSENSITIVE", "FIXED_STRING", "REGEX"], "exactly one match mode"),
+        ):
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["parameters"]["options"] = options
+            self.invalid(record, message)
+        record = copy.deepcopy(RECORD)
+        record["tool_or_method"]["tool"] = {"kind": "MANUAL", "identity": "manual review"}
+        record["tool_or_method"]["procedure"] = "MANUAL_REVIEW_ALL_DECLARED_ITEMS"
+        self.invalid(record, "MANUAL tool options must be exactly LINE_BY_LINE")
+        record["tool_or_method"]["parameters"]["options"] = ["LINE_BY_LINE", "CASE_INSENSITIVE", "FIXED_STRING", "RECURSIVE"]
+        self.invalid(record, "MANUAL tool options must be exactly LINE_BY_LINE")
+
+    def test_completion_closed_shape(self) -> None:
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["completion"] = "complete"
+        self.invalid(record, "completion must contain only")
+        for field in ("declared_count", "inspected_count", "blocked_count", "match_count"):
+            record = copy.deepcopy(RECORD); del record["tool_or_method"]["completion"][field]
+            self.invalid(record, "completion must contain only")
+        record = copy.deepcopy(RECORD); record["tool_or_method"]["completion"]["extra"] = 0
+        self.invalid(record, "completion must contain only")
+
+    def test_every_completion_count_type(self) -> None:
+        for field in ("declared_count", "inspected_count", "blocked_count", "match_count"):
+            for value in (-1, True, "0"):
+                record = copy.deepcopy(RECORD); record["tool_or_method"]["completion"][field] = value
+                self.invalid(record, f"completion.{field} must be a nonnegative integer")
+
+    def test_completion_semantics(self) -> None:
+        for field, value, message in (
+            ("declared_count", 41, "declared_count must equal inspected_count"),
+            ("inspected_count", 41, "completion.inspected_count must equal inspected_count"),
+            ("blocked_count", 1, "blocked_count must equal 0"),
+            ("match_count", 3, "match_count must equal 0"),
+        ):
+            record = copy.deepcopy(RECORD); record["tool_or_method"]["completion"][field] = value
+            self.invalid(record, message)
+
+    def test_retrieval_and_result_contract(self) -> None:
+        record = copy.deepcopy(RECORD); record["retrieval_status"] = "DEAD"
+        self.invalid(record, "retrieval_status must be COMPLETE")
+        for field, value, message in (("outcome", "FOUND", "outcome must be NOT_FOUND"),
+                                      ("inspected_count", 7, "scoped_result.inspected_count"),
+                                      ("corpus_or_paths", ["other/"], "scoped_result.corpus_or_paths")):
+            record = copy.deepcopy(RECORD); record["scoped_result"][field] = value
+            self.invalid(record, message)
+        record = copy.deepcopy(RECORD); record["scoped_result"] = []
+        self.invalid(record, "scoped_result must contain only")
+        for field in ("outcome", "inspected_count", "corpus_or_paths"):
+            record = copy.deepcopy(RECORD); del record["scoped_result"][field]
+            self.invalid(record, "scoped_result must contain only")
+        record = copy.deepcopy(RECORD); record["scoped_result"]["extra"] = 1
+        self.invalid(record, "scoped_result must contain only")
+        record = copy.deepcopy(RECORD)
+        record["inspected_count"] = 1
+        record["tool_or_method"]["completion"]["declared_count"] = 1
+        record["tool_or_method"]["completion"]["inspected_count"] = 1
+        record["scoped_result"]["inspected_count"] = True
+        self.invalid(record, "scoped_result.inspected_count must be a positive integer")
+
+    def test_consequence_is_closed_and_mirrored(self) -> None:
+        for prose in LEGACY_CONSEQUENCE_PROSE:
+            record = copy.deepcopy(RECORD); record["consequence"] = prose
+            self.invalid(record, "consequence must contain only")
+        for field in ("mode", "component_ids", "corpus_or_paths"):
+            record = copy.deepcopy(RECORD); del record["consequence"][field]
+            self.invalid(record, "consequence must contain only")
+        record = copy.deepcopy(RECORD); record["consequence"]["extra"] = 1
+        self.invalid(record, "consequence must contain only")
+        record = copy.deepcopy(RECORD); record["consequence"] = []
+        self.invalid(record, "consequence must contain only")
+        record = copy.deepcopy(RECORD); record["consequence"]["mode"] = "GLOBAL"
+        self.invalid(record, "controlled consequence enum")
+        record = copy.deepcopy(RECORD); record["consequence"]["mode"] = []
+        self.invalid(record, "controlled consequence enum")
+        record = copy.deepcopy(RECORD); record["consequence"]["component_ids"] = ["R9.z"]
+        self.invalid(record, "consequence.component_ids")
+        record = copy.deepcopy(RECORD); record["consequence"]["corpus_or_paths"] = ["other/"]
+        self.invalid(record, "consequence.corpus_or_paths")
+
+
+if __name__ == "__main__":
+    unittest.main()
