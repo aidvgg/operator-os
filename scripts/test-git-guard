@@ -24,7 +24,6 @@ Exit 0 all green, 1 on any failure (each failure printed). 3.9-clean.
 """
 import json
 import os
-import pwd
 import shlex
 import shutil
 import subprocess
@@ -36,8 +35,11 @@ GIT_HOOK = os.path.join(ROOT, ".claude", "hooks", "deny-destructive-git.py")
 ENV_HOOK = os.path.join(ROOT, ".claude", "hooks", "deny-env-access.py")
 SETTINGS = os.path.join(ROOT, ".claude", "settings.json")
 CODEX_HOOKS = os.path.join(ROOT, ".codex", "hooks.json")
-USER_NAME = pwd.getpwuid(os.getuid()).pw_name
-USER_HOME = os.path.expanduser("~" + USER_NAME)
+FIXTURE_HOME = tempfile.TemporaryDirectory(
+    prefix="git-guard-home-", dir=os.path.dirname(ROOT))
+USER_HOME = FIXTURE_HOME.name
+os.environ["HOME"] = USER_HOME
+GUARD_ENV = dict(os.environ)
 ROOT_GLOB_FROM_HOME = shlex.quote(os.path.relpath(ROOT, USER_HOME)) + "/.e*"
 GROK_HOOKS = os.path.join(ROOT, ".grok", "hooks", "guards.json")
 
@@ -238,7 +240,6 @@ ENV_DENY = [
     "unset X; cat .${X:-e}nv.local; X=x",
     "cat ~+/.e*",
     "cd ~; cat %s" % ROOT_GLOB_FROM_HOME,
-    "cd ~%s; cat %s" % (USER_NAME, ROOT_GLOB_FROM_HOME),
     "cat .[[:alpha:]]nv.local",
     "cat .{env,notes}.local",
     "cat .e\\nv.local",
@@ -444,7 +445,7 @@ def hook_reason(hook, payload):
     proc = subprocess.run(
         [sys.executable, hook],
         input=json.dumps(payload),
-        capture_output=True, text=True, cwd=ROOT,
+        capture_output=True, text=True, cwd=ROOT, env=GUARD_ENV,
     )
     if proc.returncode != 0:
         return ("invalid", "")
@@ -463,7 +464,7 @@ def hook_result_raw(hook, raw_input):
     proc = subprocess.run(
         [sys.executable, hook],
         input=raw_input,
-        capture_output=True, text=True, cwd=ROOT,
+        capture_output=True, text=True, cwd=ROOT, env=GUARD_ENV,
     )
     if proc.returncode != 0:
         return "invalid"

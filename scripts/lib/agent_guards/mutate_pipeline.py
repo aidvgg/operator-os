@@ -229,7 +229,7 @@ def run_pipeline(
     paths,
     patch_file,
     message,
-    bot,
+    host,
     skill,
     mode,
     no_pull=False,
@@ -319,8 +319,8 @@ def run_pipeline(
 
         body = (
             "%s\n\n"
-            "agent-mutate bot=%s skill=%s mode=%s\n"
-            "paths: %s\n" % (message, bot, skill, mode, ", ".join(paths))
+            "agent-mutate host=%s skill=%s mode=%s\n"
+            "paths: %s\n" % (message, host, skill, mode, ", ".join(paths))
         )
         guarded_run(cwd, ["git", "-C", str(cwd), "commit", "-m", body])
     except Exception:
@@ -339,7 +339,7 @@ def run_pipeline(
     print("sha: %s" % sha)
     print("paths: %s" % ", ".join(paths))
     print("doctor: clean")
-    print("bot: %s" % bot)
+    print("host: %s" % host)
     print("skill: %s" % skill)
     print("mode: %s" % mode)
     return 0

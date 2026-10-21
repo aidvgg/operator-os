@@ -17,7 +17,7 @@ RECORD = {
     "absence_id": "A1", "q_ids": ["Q1"], "component_ids": ["R1.b"],
     "corpus_or_paths": ["policy/current/", "policy/archive/2025/"],
     "terms_and_synonyms": {"terms": ["automatic renewal"], "synonyms": ["auto-renewal"]},
-    "search_date": "2026-08-30",
+    "search_date": "2025-04-14",
     "tool_or_method": {
         "tool": {"kind": "EXECUTABLE", "identity": "ripgrep 14.1.1"},
         "procedure": "SEARCH_THEN_INSPECT_ALL_MATCHES",

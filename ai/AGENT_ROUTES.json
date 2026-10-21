@@ -147,7 +147,7 @@
       "writes": "direct_edits_pretooluse_githooks"
     },
     "remote": {
-      "examples": ["an always-on chat bot", "a scheduled cloud worker"],
+      "examples": ["an always-on chat service", "a scheduled cloud worker"],
       "ops_doc": "knowledge/ops/remote-agent-hosts.md",
       "bookkeeping": "scripts/agent-mutate",
       "inbox_apply": "scripts/agent-apply-inbox",

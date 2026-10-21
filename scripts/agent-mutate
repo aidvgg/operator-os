@@ -20,7 +20,7 @@ v1 write licenses (bookkeeping only; owner files use agent-apply-inbox):
   prospect-brief - outputs/outbound/briefs/**
 
 Usage:
-  scripts/agent-mutate --bot Coding --skill daily-log --mode eod \
+  scripts/agent-mutate --host Coding --skill daily-log --mode eod \
     --paths knowledge/ops/logbook/HABITS.md --message "log: mark habit" \
     --patch FILE [--root REPO] [--no-pull] [--no-push] [--dry-run]
 """
@@ -74,7 +74,7 @@ def parse_paths(items):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="agent-mutate")
-    ap.add_argument("--bot", required=True)
+    ap.add_argument("--host", required=True)
     ap.add_argument("--skill", required=True, choices=sorted(SKILL_IDS))
     ap.add_argument("--mode", required=True)
     ap.add_argument("--paths", action="append", default=[], required=True)
@@ -106,7 +106,7 @@ def main(argv=None):
         paths,
         args.patch,
         args.message,
-        args.bot,
+        args.host,
         args.skill,
         args.mode,
         no_pull=args.no_pull,

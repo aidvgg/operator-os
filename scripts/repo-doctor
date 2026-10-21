@@ -2266,13 +2266,13 @@ def _run():
     if len(sys.argv) != 1:
         return main()
     try:
-        from doctor_cache import cache_path, fingerprint, read_cache, write_cache
+        from doctor_cache import cache_now, cache_path, fingerprint, read_cache, write_cache
         environment = dict(os.environ)
         cache_file = cache_path(ROOT, environment)
-        key = fingerprint(ROOT, environment, datetime.now())
+        key = fingerprint(ROOT, environment, cache_now(environment))
         cached = read_cache(cache_file, key)
         if cached is not None and key is not None \
-                and key == fingerprint(ROOT, environment, datetime.now()):
+                and key == fingerprint(ROOT, environment, cache_now(environment)):
             sys.stdout.write(cached)
             return 0
     except Exception:
@@ -2283,7 +2283,7 @@ def _run():
             result = main()
     finally:
         sys.stdout.write(captured.getvalue())
-    if result == 0 and key == fingerprint(ROOT, environment, datetime.now()) \
+    if result == 0 and key == fingerprint(ROOT, environment, cache_now(environment)) \
             and not any(pattern.search(captured.getvalue()) for pattern in SECRET_PATTERNS):
         write_cache(cache_file, key, captured.getvalue())
     return result

@@ -98,7 +98,7 @@ Use a verified-absence record only when a completed, bounded search establishes 
     "terms": ["automatic renewal"],
     "synonyms": ["auto-renewal", "renews automatically"]
   },
-  "search_date": "2026-08-30",
+  "search_date": "2025-04-14",
   "tool_or_method": {
     "tool": {
       "kind": "EXECUTABLE",

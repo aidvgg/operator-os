@@ -16,15 +16,15 @@ DECISIONS = """# Decisions
 
 | Date | Decision | Falsifiable prediction | Review on | Outcome |
 |---|---|---|---|---|
-| 2026-09-19 | **ACME RETAIL CHANGE WAS CHARGED, NOT PASSED: $1,275 ON NET 7.** Long prose about the quote, with a `code | pipe` inside it. | Both invoices are paid by their Net 7 dates. | 2026-10-08 | |
-| 2026-08-01 | **A SETTLED RULING.** Prose. | It holds. | 2026-09-01 | Held, scored 2026-09-01 |
-| 2026-07-01 | A row with no bold headline at all, only plain prose that runs on for a while. | p | 2026-08-01 | ⏳ waiting on data |
+| 2025-03-04 | **FICTIONAL BAKERY ORDER QUEUE: ADD CUPCAKE STATUS FILTER.** Synthetic note about the bakery queue, with a `code | pipe` inside it. | The cupcake status filter shows orders awaiting pickup. | 2025-03-18 | |
+| 2025-01-13 | **A SETTLED FILTER CHOICE.** Prose. | It holds. | 2025-02-03 | Held, scored 2025-02-03 |
+| 2025-01-02 | A row with no bold headline at all, only plain prose that runs on for a while. | p | 2025-01-13 | ⏳ waiting on data |
 """
 ERRORS = """# Errors
 
 | Date | Incident | Control that now prevents it |
 |---|---|---|
-| 2026-09-18 | **The bot told Sam his close did not land when it had.** Detail. | Instant callback answer. |
+| 2025-03-07 | **The bakery display duplicated an order after a refresh.** Detail. | Use the order key to render each order once. |
 
 ## Hazards
 
@@ -50,23 +50,23 @@ class TestLedgerIndex(unittest.TestCase):
         code, out = self.run_it()
         self.assertEqual(code, 0)
         self.assertIn("# ai/DECISIONS.md, 3 row(s)", out)
-        self.assertIn("2026-09-19 | ACME RETAIL CHANGE WAS CHARGED, NOT PASSED: $1,275 ON NET 7 | 2026-10-08 | open", out)
-        self.assertIn("2026-08-01 | A SETTLED RULING | 2026-09-01 | Held, scored 2026-09-01", out)
-        self.assertIn("2026-07-01 | A row with no bold headline at all", out)
+        self.assertIn("2025-03-04 | FICTIONAL BAKERY ORDER QUEUE: ADD CUPCAKE STATUS FILTER | 2025-03-18 | open", out)
+        self.assertIn("2025-01-13 | A SETTLED FILTER CHOICE | 2025-02-03 | Held, scored 2025-02-03", out)
+        self.assertIn("2025-01-02 | A row with no bold headline at all", out)
         self.assertIn("# ai/ERRORS.md, 1 row(s)", out)  # the hazards table is not a dated row
-        self.assertIn("2026-09-18 | The bot told Sam his close did not land when it had", out)
-        self.assertNotIn("Long prose", out)
+        self.assertIn("2025-03-07 | The bakery display duplicated an order after a refresh", out)
+        self.assertNotIn("Synthetic note", out)
 
     def test_open_lists_only_unscored_decisions(self):
         _code, out = self.run_it("--open")
         self.assertIn("2 row(s), open only", out)
-        self.assertNotIn("A SETTLED RULING", out)
+        self.assertNotIn("A SETTLED FILTER CHOICE", out)
         self.assertNotIn("ERRORS", out)
 
     def test_grep_returns_whole_rows_that_hold_every_term(self):
-        _code, out = self.run_it("--grep", "net 7", "ACME")
-        self.assertIn("Long prose about the quote, with a `code | pipe` inside it.", out)
-        self.assertIn("1 row(s) hold: net 7 + acme", out)
+        _code, out = self.run_it("--grep", "cupcake", "bakery")
+        self.assertIn("Synthetic note about the bakery queue, with a `code | pipe` inside it.", out)
+        self.assertIn("1 row(s) hold: cupcake + bakery", out)
         _code, none = self.run_it("--grep", "nothing-like-this")
         self.assertIn("0 row(s) hold", none)
 
@@ -88,85 +88,85 @@ class TestLedgerIndex(unittest.TestCase):
     def test_xx_date_stays_literal_and_retrievable(self):
         path = self.root / "ai" / "ERRORS.md"
         path.write_text(path.read_text(encoding="utf-8") +
-                        "| 2026-05-xx | **Duplicate invoice number NW-2026-104.** Recalled, not read. | Read the ledger. |\n",
+                        "| 2025-04-xx | **Duplicate cupcake pickup ticket in the sample queue.** The display rendered one test order twice. | Deduplicate display rows by order key. |\n",
                         encoding="utf-8")
         code, out = self.run_it("errors")
         self.assertEqual(code, 0)
-        self.assertIn("2026-05-xx | Duplicate invoice number NW-2026-104", out)
-        self.assertNotIn("2026-05-01", out)
-        code, got = self.run_it("--grep", "Duplicate invoice")
+        self.assertIn("2025-04-xx | Duplicate cupcake pickup ticket in the sample queue", out)
+        self.assertNotIn("2025-04-01", out)
+        code, got = self.run_it("--grep", "Duplicate cupcake pickup")
         self.assertEqual(code, 0)
-        self.assertIn("| 2026-05-xx | **Duplicate invoice number NW-2026-104.** Recalled, not read. | Read the ledger. |", got)
-        self.assertIn("1 row(s) hold: duplicate invoice", got)
+        self.assertIn("| 2025-04-xx | **Duplicate cupcake pickup ticket in the sample queue.** The display rendered one test order twice. | Deduplicate display rows by order key. |", got)
+        self.assertIn("1 row(s) hold: duplicate cupcake pickup", got)
 
     def test_preamble_and_hazard_pointers_open_multiline_blocks(self):
         (self.root / "ai" / "DECISIONS.md").write_text("""# Decisions
 
-Intro paragraph for the review-date rule.
+Intro paragraph for the bakery filter review.
 ALPHA-INTRO sits in the continuation.
 
-**Billing-date correction (Sam, 2026-08-25):** Acme Retail pays
-on the 7th. Token BETA-PAY.
+**Bakery queue filter note (fictional, 2025-02-05):** cupcake orders appear
+in the pickup view. Token BETA-ORDER.
 
-**SUPERSEDED - retired sales route.** Token GAMMA-LANE.
+**SUPERSEDED - retired sample view.** Token GAMMA-VIEW.
 
 | Date | Decision | Falsifiable prediction | Review on | Outcome |
 |---|---|---|---|---|
-| 2026-09-19 | **A ROW.** | p | 2026-10-01 | |
-| 2026-07-31 | **CROSS MODEL ADOPTED.** | p | 2026-08-28 | ❌ REOPENED 2026-09-18 by Sam |
+| 2025-03-04 | **A SAMPLE BAKERY ROW.** | p | 2025-04-01 | |
+| 2025-02-14 | **ORDER KEY DEDUPLICATION ADOPTED.** | p | 2025-03-01 | ❌ REOPENED 2025-03-07 in the test fixture |
 """, encoding="utf-8")
         (self.root / "ai" / "ERRORS.md").write_text("""# Errors
 
-Every check traces to an incident or a hazard.
+Every sample control points to a test case.
 
 | Date | Incident | Control that now prevents it |
 |---|---|---|
-| 2026-09-18 | **One incident.** | Control. |
+| 2025-03-07 | **One sample refresh duplicated an order.** | Control. |
 
 ## Hazards
 
-- **`send-approval` (2026-08-30)** - explicit send approval
-  was not bound to exact artifact bytes.
+- **`cupcake-order-refresh` (2025-04-14)** - deduplicate refreshed cupcake orders
+  did not reuse the sample order key.
 
 - **`other-hazard`** - unrelated note.
 """, encoding="utf-8")
         code, out = self.run_it()
         self.assertEqual(code, 0)
-        self.assertIn("ai/DECISIONS.md:3 | preamble | Intro paragraph for the review-date rule", out)
-        self.assertIn("ai/DECISIONS.md:6 | preamble | Billing-date correction (Sam, 2026-08-25)", out)
-        self.assertIn("ai/DECISIONS.md:9 | preamble | SUPERSEDED - retired sales route", out)
-        self.assertIn("ai/ERRORS.md:3 | preamble | Every check traces to an incident or a hazard", out)
-        self.assertIn("ai/ERRORS.md:11 | hazard | `send-approval` (2026-08-30)", out)
-        self.assertNotIn("BETA-PAY", out)
-        self.assertNotIn("GAMMA-LANE", out)
+        self.assertIn("ai/DECISIONS.md:3 | preamble | Intro paragraph for the bakery filter review", out)
+        self.assertIn("ai/DECISIONS.md:6 | preamble | Bakery queue filter note (fictional, 2025-02-05)", out)
+        self.assertIn("ai/DECISIONS.md:9 | preamble | SUPERSEDED - retired sample view", out)
+        self.assertIn("ai/ERRORS.md:3 | preamble | Every sample control points to a test case", out)
+        self.assertIn("ai/ERRORS.md:11 | hazard | `cupcake-order-refresh` (2025-04-14)", out)
+        self.assertNotIn("BETA-ORDER", out)
+        self.assertNotIn("GAMMA-VIEW", out)
         self.assertNotIn("ALPHA-INTRO", out)
-        self.assertNotIn("artifact bytes", out)
-        code, got = self.run_it("--grep", "send", "bytes")
+        self.assertNotIn("sample order key", out)
+        code, got = self.run_it("--grep", "order", "key")
         self.assertEqual(code, 0)
-        self.assertIn("explicit send approval\n  was not bound to exact artifact bytes.", got)
+        self.assertIn("deduplicate refreshed cupcake orders\n  did not reuse the sample order key.", got)
         self.assertNotIn("unrelated note", got)
-        self.assertIn("1 row(s) hold: send + bytes", got)
+        self.assertIn("2 row(s) hold: order + key", got)
         code, intro = self.run_it("--grep", "ALPHA-INTRO")
         self.assertEqual(code, 0)
-        self.assertIn("Intro paragraph for the review-date rule.\nALPHA-INTRO sits in the continuation.", intro)
+        self.assertIn("Intro paragraph for the bakery filter review.\nALPHA-INTRO sits in the continuation.", intro)
         self.assertIn("1 row(s) hold: alpha-intro", intro)
         code, opened = self.run_it("--at", "ai/DECISIONS.md:7")
         self.assertEqual(code, 0)
-        self.assertIn("**Billing-date correction (Sam, 2026-08-25):** Acme Retail pays\non the 7th. Token BETA-PAY.", opened)
-        self.assertNotIn("GAMMA-LANE", opened)
+        self.assertIn("**Bakery queue filter note (fictional, 2025-02-05):** cupcake orders appear\nin the pickup view. Token BETA-ORDER.", opened)
+        self.assertNotIn("GAMMA-VIEW", opened)
         code, open_out = self.run_it("--open")
-        self.assertIn("CROSS MODEL ADOPTED", open_out)
-        self.assertNotIn("Billing-date correction", open_out)
+        self.assertIn("ORDER KEY DEDUPLICATION ADOPTED", open_out)
+        self.assertNotIn("Bakery queue filter note", open_out)
         self.assertNotIn("ERRORS", open_out)
 
     def test_mention_of_reopened_does_not_open_a_closed_outcome(self):
         path = self.root / "ai" / "DECISIONS.md"
         path.write_text(path.read_text(encoding="utf-8") +
-                        "| 2026-07-08 | **PRICE HELD.** | p | 2026-08-07 | ✅ CONFIRMED 2026-08-07: the price was not reopened. |\n",
+                        "| 2025-02-01 | **CUPCAKE FILTER KEPT.** | p | 2025-02-08 | ✅ CONFIRMED 2025-02-08: the filter was not removed. |\n",
                         encoding="utf-8")
         _code, out = self.run_it("--open")
-        self.assertNotIn("PRICE HELD", out)
-        self.assertNotIn("A SETTLED RULING", out)
+        self.assertNotIn("CUPCAKE FILTER KEPT", out)
+        self.assertNotIn("A SETTLED FILTER CHOICE", out)
 
 
 if __name__ == "__main__":

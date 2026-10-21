@@ -61,7 +61,7 @@ def spawn_tty(cmd, cwd):
 
 def clone_armed(tmp):
     dest = tmp / "clone"
-    r = run(["git", "clone", "--local", str(ROOT), str(dest)])
+    r = run(["git", "clone", "--local", "--no-hardlinks", str(ROOT), str(dest)])
     if r.returncode != 0:
         raise SystemExit("clone failed: %s" % r.stderr)
     run(["git", "-C", str(dest), "config", "core.hooksPath", ".githooks"])
@@ -86,7 +86,7 @@ def mutate(clone, extra, expect_fail_cls=None, skill="daily-log"):
     cmd = [
         sys.executable,
         str(MUTATE),
-        "--bot",
+        "--host",
         "test",
         "--skill",
         skill,
@@ -307,11 +307,11 @@ def main():
             expect_fail_cls="unlicensed-path",
         )
 
-        stamp = clone / "outputs" / "inbox" / "testbot" / "20260911T000000Z"
+        stamp = clone / "outputs" / "inbox" / "fixture-host" / "20250414T000000Z"
         stamp.mkdir(parents=True)
         (stamp / "PROPOSAL.md").write_text("owner-file fixture\n", encoding="utf-8")
         (stamp / "MANIFEST.json").write_text(
-            '{"bot":"testbot","skill":"inbox","mode":"owner",'
+            '{"host":"fixture-host","skill":"inbox","mode":"owner",'
             '"paths":["knowledge/ops/remote-agent-hosts.md"],'
             '"message":"test: inbox owner-file apply"}\n',
             encoding="utf-8",

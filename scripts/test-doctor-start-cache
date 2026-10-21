@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from doctor_cache import fingerprint, cache_path, read_cache, write_cache
+from doctor_cache import cache_now, fingerprint, cache_path, read_cache, write_cache
 
 DOCTOR = Path(__file__).with_name("repo-doctor")
 
@@ -41,11 +41,12 @@ class DoctorCacheTest(unittest.TestCase):
         self.home.mkdir()
         (self.home / ".codex").mkdir()
         (self.home / ".codex" / "config.toml").write_text("trusted = true\n")
-        self.env = {**os.environ, "HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex")}
+        self.env = {**os.environ, "HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex"),
+                    "OPERATOR_OS_DOCTOR_DATE": "2026-09-24"}
         self.now = datetime(2026, 9, 24, 12, 0, 0)
 
     def fp(self, when=None):
-        return fingerprint(self.root, self.env, when or self.now)
+        return fingerprint(self.root, self.env, when or cache_now(self.env))
 
     def test_untracked_ignored_and_same_size_rewrite_invalidate(self):
         first = self.fp()
@@ -172,7 +173,7 @@ class DoctorCacheTest(unittest.TestCase):
         scripts = self.root / "scripts"
         scripts.mkdir()
         shutil.copy2(DOCTOR, scripts / "repo-doctor")
-        key = self.fp(datetime.now())  # the subprocess fingerprints with the real date
+        key = self.fp(cache_now(self.env))  # the subprocess uses the same pinned date
         write_cache(cache_path(self.root, self.env), key, "repo-doctor: cached sentinel\n")
 
         def run(*args):

@@ -19,8 +19,8 @@ import tempfile
 
 
 SCRIPT = Path(__file__).resolve().parent / "artifact-receipt-check"
-STAMP_APPROVED = "2026-08-30T10:00:00Z"
-STAMP_TRANSITION = "2026-08-30T11:00:00Z"
+STAMP_APPROVED = "2025-04-14T10:00:00Z"
+STAMP_TRANSITION = "2025-04-14T11:00:00Z"
 assertions = 0
 failures = []
 
@@ -216,7 +216,7 @@ def main():
               "evidence.provider_reference_id contains placeholder text")
 
         bad = copy.deepcopy(sent)
-        bad["evidence"]["timestamp"] = "2026-08-30T11:01:00Z"
+        bad["evidence"]["timestamp"] = "2025-04-14T11:01:00Z"
         check("send timestamp disagreement", root, [approval, bad], False,
               "must equal the receipt timestamp")
 
@@ -284,14 +284,14 @@ def main():
 
         future = copy.deepcopy(approval)
         future["receipt_id"] = "approval-from-future"
-        future["timestamp"] = "2026-08-30T12:00:00Z"
+        future["timestamp"] = "2025-04-14T12:00:00Z"
         bad = copy.deepcopy(sent)
         bad["prior_approval_receipt_id"] = future["receipt_id"]
         check("approval after send", root, [future, bad], False,
               "later than the transition")
 
         bad = copy.deepcopy(approval)
-        bad["timestamp"] = "2026-08-30T10:00:00"
+        bad["timestamp"] = "2025-04-14T10:00:00"
         check("timezone missing", root, [bad], False, "must include Z or a UTC offset")
 
         bad = copy.deepcopy(approval)

@@ -9,9 +9,9 @@ Remote hosts write the stamp directory and stop. They never run `scripts/agent-a
 ## Layout
 
 ```
-outputs/inbox/<bot>/<UTC-stamp>/
+outputs/inbox/<host>/<UTC-stamp>/
   PROPOSAL.md      intent, owner files, rationale
-  MANIFEST.json    bot, skill, mode, paths, message
+  MANIFEST.json    host, skill, mode, paths, message
   patch.diff       required unified diff (paths must match MANIFEST)
   APPROVED         operator-written; one line: bundle_sha256: <64-hex>
 ```
@@ -25,8 +25,8 @@ hash mismatch.
 From a real terminal, after inspecting:
 
 ```
-scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp> --print-hash
-scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp>
+scripts/agent-apply-inbox outputs/inbox/<host>/<UTC-stamp> --print-hash
+scripts/agent-apply-inbox outputs/inbox/<host>/<UTC-stamp>
 ```
 
 No TTY, no `APPROVED`, or a hash mismatch refuses. Owner-file paths are allowed on this path. Env

@@ -1,4 +1,8 @@
-"""Fail-closed memo for a successful local, no-argument repo-doctor run."""
+"""Fail-closed memo for a successful local, no-argument repo-doctor run.
+
+OPERATOR_OS_DOCTOR_DATE may pin the cache clock to YYYY-MM-DD for reproducible
+runs and tests. Normal operation uses the current local datetime.
+"""
 import hashlib
 import json
 import os
@@ -6,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 
@@ -13,6 +18,14 @@ SCHEMA = 2
 SKIP_ROOT_DIRS = {".git", "node_modules", ".worktrees"}
 # Live key files are never statted or hashed. The tracked placeholder is ordinary config.
 KEY_FILE_PREFIX, KEY_TEMPLATE = ".env", ".env.example"
+
+
+def cache_now(env):
+    """Return the cache clock, honoring the documented YYYY-MM-DD override."""
+    pinned = env.get("OPERATOR_OS_DOCTOR_DATE")
+    if pinned:
+        return datetime.strptime(pinned, "%Y-%m-%d").replace(hour=12)
+    return datetime.now()
 
 
 def _key_file(name):
@@ -46,6 +59,7 @@ def fingerprint(root, env, now):
                 return None
         environment = sorted((key, value) for key, value in env.items()
                              if key in {"HOME", "PATH", "TZ", "LANG", "CODEX_HOME", "XDG_CONFIG_HOME"}
+                             or key in {"OPERATOR_OS_DOCTOR_DATE"}
                              or key.startswith(("GIT_", "PYTHON", "LC_")))
         inputs = [SCHEMA, str(root), now.date().isoformat(), sys.version, sys.executable, environment, tracked]
         for args in (("rev-parse", "--verify", "HEAD"), ("status", "--porcelain=v1", "-z", "-uall"),

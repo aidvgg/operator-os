@@ -8,7 +8,7 @@ The v1 JSON shape is intentionally closed. Every top-level field is required:
 
   {
     "schema_version": "operator-os.artifact-receipt/v1",
-    "receipt_id": "approval-2026-08-30-01",
+    "receipt_id": "approval-2025-04-14-01",
     "artifact": {
       "path": "outputs/proposals/example.pdf",
       "sha256": "<64 lowercase hex characters>",
@@ -16,13 +16,13 @@ The v1 JSON shape is intentionally closed. Every top-level field is required:
     },
     "transition": "approved",
     "actor": "Sam",
-    "timestamp": "2026-08-30T12:00:00Z",
+    "timestamp": "2025-04-14T12:00:00Z",
     "authorization": {
       "quote": "send it",
       "exact": true,
       "minimized": true
     },
-    "approved_use": "Send this proposal to the named client via Signal.",
+    "approved_use": "Send this proposal to the named client via the client's messaging channel.",
     "evidence": null,
     "prior_approval_receipt_id": null
   }

@@ -6,7 +6,7 @@
 ## Why
 
 Local hosts (Claude Code, Codex, Grok Build) load PreToolUse guards. A remote agent host that
-cannot load PreToolUse hooks, such as an always-on chat bot or a scheduled cloud worker, gets no
+cannot load PreToolUse hooks, such as an always-on chat service or a scheduled cloud worker, gets no
 such guard. Safety must not depend on a host that is absent, so remote writes use **the same deny
 logic and the same doctor path** as local sessions, not a softer parallel policy.
 
@@ -38,7 +38,7 @@ A remote host, against a clone whose listed paths are clean:
 
 ```
 scripts/agent-mutate \
-  --bot <name> \
+  --host <name> \
   --skill daily-log \
   --mode <mode> \
   --paths <explicit file> \
@@ -57,19 +57,19 @@ scan runs before the licence check, so a `.env` path reports `env-deny`, not `un
 
 ### Judgment or owner-file proposal (inbox)
 
-A remote host writes under `outputs/inbox/<bot>/<UTC-stamp>/` and **stops**. It never runs
+A remote host writes under `outputs/inbox/<host>/<UTC-stamp>/` and **stops**. It never runs
 `scripts/agent-apply-inbox`.
 
 The operator inspects the bundle, then:
 
 ```
-scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp> --print-hash
+scripts/agent-apply-inbox outputs/inbox/<host>/<UTC-stamp> --print-hash
 # write APPROVED containing: bundle_sha256: <hex>
-scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp>
+scripts/agent-apply-inbox outputs/inbox/<host>/<UTC-stamp>
 ```
 
 Apply requires a TTY, an `APPROVED` file whose `bundle_sha256` matches `PROPOSAL.md`,
-`MANIFEST.json` and `patch.diff`, and the inbox path `outputs/inbox/<bot>/<stamp>/`. Changing the
+`MANIFEST.json` and `patch.diff`, and the inbox path `outputs/inbox/<host>/<stamp>/`. Changing the
 patch after approval is a hash mismatch. Owner-file paths are allowed on this path; env deny, the
 protected-path doctor and the hooksPath check still apply. There is no `--approved` flag.
 

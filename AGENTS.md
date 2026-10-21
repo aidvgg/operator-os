@@ -106,7 +106,7 @@ Every skill this repository ships, with its trigger and its canonical file:
 
 ## Remote agents
 
-A remote agent host that cannot load PreToolUse hooks (for example an always-on chat bot or a scheduled cloud worker) writes bookkeeping only through `scripts/agent-mutate`, for licensed skill paths, with a required patch. Judgment or owner-file proposals land in `outputs/inbox/`; `scripts/agent-apply-inbox` applies them only from a TTY after an APPROVED file whose bundle_sha256 matches the proposal, manifest, and patch. Remote hosts never run the apply script. Same deny and doctor entrypoints as local hooks (`scripts/lib/agent_guards`, `scripts/agent-guard`, `scripts/repo-doctor`). Owner: `knowledge/ops/remote-agent-hosts.md`.
+A remote agent host that cannot load PreToolUse hooks (for example an always-on chat service or a scheduled cloud worker) writes bookkeeping only through `scripts/agent-mutate`, for licensed skill paths, with a required patch. Judgment or owner-file proposals land in `outputs/inbox/`; `scripts/agent-apply-inbox` applies them only from a TTY after an APPROVED file whose bundle_sha256 matches the proposal, manifest, and patch. Remote hosts never run the apply script. Same deny and doctor entrypoints as local hooks (`scripts/lib/agent_guards`, `scripts/agent-guard`, `scripts/repo-doctor`). Owner: `knowledge/ops/remote-agent-hosts.md`.
 
 ## Maintenance
 

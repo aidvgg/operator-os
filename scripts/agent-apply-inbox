@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply an approved remote-agent inbox proposal through the mutate pipeline.
 
-Remotes write outputs/inbox/<bot>/<stamp>/{PROPOSAL.md,MANIFEST.json,patch.diff}
+Remotes write outputs/inbox/<host>/<stamp>/{PROPOSAL.md,MANIFEST.json,patch.diff}
 and stop. They never run this script.
 
 The operator inspects the proposal, writes APPROVED containing
@@ -11,8 +11,8 @@ Owner-file paths are allowed here. Env deny, protected-path doctor, and
 hooksPath still apply. Hash mismatch or a non-TTY refuses.
 
 Usage:
-  scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp> --print-hash
-  scripts/agent-apply-inbox outputs/inbox/<bot>/<UTC-stamp>
+  scripts/agent-apply-inbox outputs/inbox/<host>/<UTC-stamp> --print-hash
+  scripts/agent-apply-inbox outputs/inbox/<host>/<UTC-stamp>
                             [--root REPO] [--no-pull] [--no-push] [--dry-run]
 """
 from __future__ import annotations
@@ -87,7 +87,7 @@ def load_manifest(inbox):
         manifest = json.loads((inbox / "MANIFEST.json").read_text(encoding="utf-8"))
     except Exception as e:
         raise MutateError("inbox-missing", "MANIFEST.json unreadable: %s" % e)
-    for key in ("bot", "skill", "mode", "paths", "message"):
+    for key in ("host", "skill", "mode", "paths", "message"):
         if key not in manifest:
             raise MutateError("inbox-missing", "MANIFEST.json missing %s" % key)
     paths = manifest["paths"]
@@ -96,24 +96,24 @@ def load_manifest(inbox):
     return manifest
 
 
-def require_inbox_layout(cwd, inbox, bot):
+def require_inbox_layout(cwd, inbox, host):
     root_inbox = (cwd / "outputs" / "inbox").resolve()
     try:
         rel = inbox.relative_to(root_inbox)
     except ValueError:
         raise MutateError(
             "inbox-layout",
-            "inbox dir must be under outputs/inbox/<bot>/<stamp>/",
+            "inbox dir must be under outputs/inbox/<host>/<stamp>/",
         )
     if len(rel.parts) != 2:
         raise MutateError(
             "inbox-layout",
-            "expected outputs/inbox/<bot>/<stamp>/, got outputs/inbox/%s" % rel,
+            "expected outputs/inbox/<host>/<stamp>/, got outputs/inbox/%s" % rel,
         )
-    if rel.parts[0] != str(bot):
+    if rel.parts[0] != str(host):
         raise MutateError(
             "inbox-layout",
-            "directory bot %r must match MANIFEST bot %r" % (rel.parts[0], bot),
+            "directory host %r must match MANIFEST host %r" % (rel.parts[0], host),
         )
 
 
@@ -147,7 +147,7 @@ def main(argv=None):
         )
 
     manifest = load_manifest(inbox)
-    require_inbox_layout(cwd, inbox, manifest["bot"])
+    require_inbox_layout(cwd, inbox, manifest["host"])
     digest2 = bundle_sha256(inbox)
     if digest2 != approved:
         raise MutateError(
@@ -160,7 +160,7 @@ def main(argv=None):
         manifest["paths"],
         inbox / "patch.diff",
         str(manifest["message"]),
-        str(manifest["bot"]),
+        str(manifest["host"]),
         str(manifest["skill"]),
         str(manifest["mode"]),
         no_pull=args.no_pull,
