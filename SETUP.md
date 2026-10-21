@@ -734,13 +734,88 @@ mechanically where a check is possible.
 
 ### Upgrades
 
-There is no upgrade tool yet. Your identity edits live in the files section 3 names (`CLAUDE.md`,
-the generators, `scripts/money`, `scripts/repo-doctor`, `scripts/backup-sensitive`, the plists,
+There is no upgrade tool. Your identity edits live in the files section 3 names (`CLAUDE.md`, the
+generators, `scripts/money`, `scripts/repo-doctor`, `scripts/backup-sensitive`, the plists,
 `scripts/sync-agent-adapters`, and the canonical knowledge files), and several of those are the same
-files a later template release changes. So a new release must be merged by hand: read its
-`CHANGELOG.md`, diff the machinery files against your copy, and carry the fixes across without
-losing your constants. Keeping your first rebrand as one clean commit makes that diff readable
-later. A config layer that separates identity from machinery is the intended fix; it is not shipped.
+files a later template release changes. So each release is merged by hand, the same way every time.
+Keeping your first rebrand as one clean commit makes that merge readable later. A config layer that
+separates identity from machinery is the intended fix; it is not shipped.
+
+1. **Read the release first.** Open its entry in `CHANGELOG.md` on the template, including its
+   Migration block if it has one. Start from a clean working tree on `main`.
+2. **Fetch the release.** Add the template as a remote once, then fetch its tags at each release:
+
+   ```bash
+   git remote add template https://github.com/aidvgg/operator-os.git
+   git fetch template --tags
+   ```
+
+3. **Bring it in.** If your repo was cloned from the template, it shares history, so merge the
+   release tag:
+
+   ```bash
+   git merge v2.3.0
+   ```
+
+   If your copy has no shared history (made with "Use this template", or copied as files), apply the
+   delta between the release you last took and the new one as a patch instead. The fetch above put
+   both tags' files in your repo, so `-3` can fall back to a three-way merge per file:
+
+   ```bash
+   git diff v2.2.0 v2.3.0 | git apply -3
+   ```
+
+4. **Resolve conflicts by file class**, using the section 3 list of identity files:
+   - **Machinery** (`scripts/`, `.claude/hooks/`, `.codex/`, `.grok/`, `skills/`, `.githooks/`,
+     `.github/`) takes the release side, unless you customised that file on purpose. Then re-apply
+     your operator constants on top: the identity lines section 3 names inside `scripts/repo-doctor`,
+     `scripts/money`, the generators and the other machinery files.
+   - **Identity and state** (`knowledge/`, `ai/`, `outputs/`, and the operator constants) keeps your
+     side. A release never knows your clients, prices or decisions.
+5. **Re-run the rebrand sweep.** Run the `skills/onboard` prose sweep (its step D9) again over the
+   merged tree, because a release can add a new place where your name is functional, not prose.
+   Check section 3d-bis and the release's Migration block for those places.
+6. **Verify.** Run these from the repo root, and fix anything they print before you commit:
+
+   ```bash
+   scripts/repo-doctor
+   ```
+
+   ```bash
+   scripts/test-git-guard
+   ```
+
+   ```bash
+   scripts/sync-agent-adapters --write
+   ```
+
+7. **Re-arm host trust.** If the release changed `.codex/hooks.json`, re-arm Codex hook trust in
+   `/hooks`; trust is per content hash, so the old grant no longer covers it. If it changed anything
+   under `.grok/`, run `grok --trust` at the repo root again.
+8. **Act on the Migration block**, then commit the upgrade as its own commit.
+
+#### Let your agent do it
+
+Paste this into Claude Code or Codex from the repo root, with the version filled in.
+
+```text
+Upgrade this Operator OS repo to template release vX.Y.Z. Work only in this repo, from its root, and never open any key file (the dot-env files).
+
+Rules first: my identity and state are mine, the template's machinery is theirs. Identity and state means CLAUDE.md's Who and How sections, everything under knowledge/, ai/ and outputs/, and every operator constant SETUP.md section 3 names (my name, business name, the OPERATOR constant in scripts/artifact-receipt-check, the plist labels, the money and backup constants). Machinery means scripts/, .claude/hooks/, .codex/, .grok/, skills/, .githooks/, .github/, the generators and the generated views. Do not push, do not delete knowledge, and stop and ask me before any step that would lose a line I wrote.
+
+Steps:
+1. Preflight. Confirm the tree is clean (git status). Create a safety branch from the current commit named pre-upgrade-vX.Y.Z. Run scripts/repo-doctor and scripts/test-git-guard and record their last lines as the baseline.
+2. Fetch the release. Add the remote if missing: git remote add template https://github.com/aidvgg/operator-os.git. Then git fetch template --tags. Confirm the tag vX.Y.Z exists and read the Migration block for that version in the template's CHANGELOG.md (git show vX.Y.Z:CHANGELOG.md).
+3. Merge. If this repo shares history with the template (git merge-base HEAD vX.Y.Z succeeds), run git merge vX.Y.Z. If it does not, apply the delta as a patch instead: git diff <previous tag I am on> vX.Y.Z | git apply -3.
+4. Resolve conflicts by file class. Machinery files take the release side unless I customised them on purpose; list any machinery file I changed before you overwrite it and ask. Identity and state files keep my side. For a file that holds both (CLAUDE.md, scripts/money, scripts/repo-doctor, the generators), keep my constants and take the release's logic, hunk by hunk. Never resolve by taking a whole side blindly.
+5. Re-run the rebrand. Follow skills/onboard/SKILL.md's rebrand sweep so any new place where the operator's name is functional gets my values. Grep the tree for the template's example name and business name afterwards; both must be gone from files I own.
+6. Regenerate and verify. Run python3 scripts/sync-agent-adapters --write, then python3 scripts/repo-doctor, python3 scripts/test-git-guard, and every scripts/test-* suite the release's CI workflow lists. Everything must be at or better than the baseline from step 1. Fix causes, never add allow entries.
+7. Re-arm hosts. If .codex/hooks.json changed, tell me to run codex at the repo root and accept the hook prompt. If .grok/ changed or is new, tell me to run grok --trust. If .claude/settings.json changed, say so.
+8. Apply the Migration block. Do each item it lists that applies to my data (for example a data-shape change in invoice or proposal JSON, or a new opt-in installer). Where an item needs a value only I have, such as a new key name, tell me exactly what to add and where, and do not add it yourself.
+9. Commit. One commit on my branch, message "Upgrade Operator OS to vX.Y.Z", listing conflicts you resolved and migration items you applied. Do not push; tell me the safety branch name so I can compare or revert.
+
+Report: baseline and final gate lines, every conflicted file and how it was resolved, every machinery file I had customised, every migration item applied or handed to me, and anything you could not do.
+```
 
 ### Rhythm
 

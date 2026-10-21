@@ -13,6 +13,22 @@ a shared guard library, new evidence tools, four first-party skills and a resear
 Existing Codex clones must re-arm hook trust because `.codex/hooks.json` changed; Grok Build needs
 folder trust once (`grok --trust`).
 
+### Migration
+
+What an existing operator must act on when taking this release. The procedure is in `SETUP.md`,
+section 7, Upgrades.
+
+- Invoice schedules need exactly one row flagged `current: true`. The generator now rejects a
+  schedule with none or with more than one, so set the flag on the live row before the next invoice.
+- `scripts/llm-draft` reads new key names, which the committed example key file now lists. Copy
+  the ones you use into your local key file yourself; no agent opens either file.
+- The net line budget for agent coding sessions is opt-in. Nothing changes until you run
+  `python3 skills/run-coding-session/scripts/install_loc_budget.py` yourself.
+- Two new places carry your name and need it after the merge: the `OPERATOR` constant in
+  `scripts/artifact-receipt-check` is compared with the `actor` of every approval receipt (see
+  `SETUP.md` section 3d-bis), and the `.grok/agents/` views name the operator in their prompts.
+  Re-running the `skills/onboard` rebrand sweep covers both.
+
 ### Security
 
 - Hardened `.claude/hooks/deny-env-access.py` across target fields, scoped glob selectors, maps,

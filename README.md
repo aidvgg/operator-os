@@ -60,6 +60,7 @@ part of it can be run end to end on day one. The setup clears that demo and puts
 business in its place.
 
 **Version:** 2.3.0. Changes per release: [`CHANGELOG.md`](CHANGELOG.md). The default branch is `main`.
+To install a new release over your own copy, follow [`SETUP.md`](SETUP.md#upgrades), section 7, Upgrades.
 
 ---
 
