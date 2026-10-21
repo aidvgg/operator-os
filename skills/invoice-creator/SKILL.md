@@ -15,6 +15,16 @@ Design source of record: `references/design-standard-2026-08-02.dc.html` (its he
 
 A guessed number is not a cosmetic error. It collides with a number already in the ledger, and two invoices carrying one reference is a payment the client's accounts payable cannot reconcile and you cannot chase.
 
+## Arithmetic-only preflight
+
+Use this branch only to check supplied invoice arithmetic, currency, or a mismatch. It does not create, price, issue, or authorize an invoice. Read only the supplied values or JSON. Do not load the ledger, client files, or payment details for this branch.
+
+1. Treat each input as operator-supplied, assumed, or unknown. A supplied amount is not proof of an agreed engagement amount.
+2. Normalize currency and compare amounts in exact two-decimal minor units. Never add or compare amounts across currencies.
+3. Check line items = subtotal, subtotal + tax = total, schedule rows = contract total, exactly one current row, and current-row amount = invoice total when a schedule is present. Report missing values and every computable mismatch.
+4. For a supplied JSON file, run `node skills/invoice-creator/scripts/generate-invoice-html.js --check-data <data.json>`. The command uses generation's validator, needs no Chrome, and writes no HTML or PDF.
+5. End with `PREFLIGHT: PASS` only when all checks pass. Otherwise report `PREFLIGHT: FAIL`; generation must not proceed. A pass checks arithmetic shape only, not the agreed amount, invoice number, or authority to issue.
+
 ## Steps
 
 1. **Read the ledger** -> get the next number (e.g. `NL-2026-004`).
@@ -29,6 +39,7 @@ A guessed number is not a cosmetic error. It collides with a number already in t
 3. **Write the data JSON** (schema below) to `outputs/invoices/<number>.json`.
 4. **Generate:** `node skills/invoice-creator/scripts/generate-invoice-html.js outputs/invoices/<number>.json "outputs/invoices/<number>_<slug>.pdf"`
    - The output path must end in `.pdf`; the sibling `.html` lands next to it. Requires node (the generator is a `.js` script) and Google Chrome or Chromium on the machine (default macOS and Linux install paths are searched; `CHROME_BIN` overrides). No `npm install` for this path; `npm install docx` is only for the legacy docx generator.
+   - Generation validates exact amounts and currency before writing either output: line items equal subtotal, subtotal plus tax equals total, and, when a schedule exists, its rows equal contract total, exactly one row is current, and that row equals the invoice total.
 5. **Verify** with the canonical validator - it must PASS:
    `scripts/pdf-check "outputs/invoices/<number>_<slug>.pdf" --expect "<number>" --expect "<total>" --expect "<bill-to name>" --expect "<from entity>" --expect "<due date>"`
    This is a real-app open test (header/trailer shape, poppler structural parse, non-empty extracted text, every font embedded, Quick Look render on darwin) plus mechanized content confirmation via `--expect`. A generated file is not a deliverable until something other than its own generator can open it: a malformed PDF and a PDF missing a fact both look fine to a string-grep on raw bytes (`ai/ERRORS.md`). Keep each `--expect` string short enough not to wrap in the rendered PDF (the number, the total, a surname); extraction inserts line breaks at wrap points.

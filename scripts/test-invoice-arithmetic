@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+GENERATOR="$ROOT/skills/invoice-creator/scripts/generate-invoice-html.js"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/northwind-invoice-arithmetic.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+
+cat > "$TMP/fake-chrome" <<'CHROME'
+#!/usr/bin/env bash
+set -euo pipefail
+output=
+for arg in "$@"; do
+  case "$arg" in --print-to-pdf=*) output=${arg#--print-to-pdf=} ;; esac
+done
+test -n "$output"
+dd if=/dev/zero of="$output" bs=1024 count=11 2>/dev/null
+printf '%%%%EOF\n' >> "$output"
+CHROME
+chmod +x "$TMP/fake-chrome"
+
+cat > "$TMP/base.json" <<'JSON'
+{
+  "invoiceNumber": "NL-2099-001",
+  "status": "Sent",
+  "dateIssued": "1 January 2099",
+  "dueDate": "8 January 2099",
+  "terms": "Net 7",
+  "currency": "usd",
+  "from": {"name": "Northwind Labs", "lines": ["Example address"], "email": "billing@example.test"},
+  "billTo": {"name": "Fable Works", "lines": ["Example country"]},
+  "lineItems": [
+    {"title": "Sample service", "amount": "123.45"},
+    {"title": "Zero-value sample", "amount": "0.00"}
+  ],
+  "subtotal": "123.45",
+  "tax": "0.00",
+  "total": "$123.45",
+  "schedule": {
+    "rows": [
+      {"label": "1 of 2", "period": "First", "status": "This invoice", "amount": "123.45", "current": true},
+      {"label": "2 of 2", "period": "Second", "status": "Scheduled", "amount": "76.55", "current": false}
+    ],
+    "contractTotal": "200.00"
+  },
+  "paymentIntro": "Sample payment instructions.",
+  "paymentTable": [{"label": "Payment reference", "value": "NL-2099-001"}]
+}
+JSON
+
+make_case() {
+  node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); Function("data",process.argv[3])(d); fs.writeFileSync(process.argv[2],JSON.stringify(d));' \
+    "$TMP/base.json" "$TMP/$1.json" "$2"
+}
+
+run_invalid() {
+  local name=$1 expression=$2 expected=$3
+  make_case "$name" "$expression"
+  if CHROME_BIN="$TMP/fake-chrome" node "$GENERATOR" "$TMP/$name.json" "$TMP/$name.pdf" >"$TMP/$name.out" 2>"$TMP/$name.err"; then
+    echo "FAIL: $name unexpectedly passed" >&2; exit 1
+  fi
+  grep -Fq "$expected" "$TMP/$name.err"
+  test ! -e "$TMP/$name.pdf" && test ! -e "$TMP/$name.html"
+}
+
+run_check_invalid() {
+  local name=$1 expression=$2 expected=$3
+  local out="$TMP/$name-output"
+  make_case "$name" "$expression"
+  mkdir "$out"
+  if (cd "$out" && CHROME_BIN="$TMP/missing-chrome" node "$GENERATOR" --check-data "$TMP/$name.json") >"$TMP/$name.out" 2>"$TMP/$name.err"; then
+    echo "FAIL: $name check-data unexpectedly passed" >&2; exit 1
+  fi
+  grep -Fq "$expected" "$TMP/$name.err"
+  test -z "$(find "$out" -mindepth 1 -print -quit)"
+}
+
+CHROME_BIN="$TMP/fake-chrome" node "$GENERATOR" "$TMP/base.json" "$TMP/valid.pdf" >"$TMP/valid.out"
+grep -Fq 'Amount (USD)' "$TMP/valid.html"
+grep -Fq "font-family:'Space Grotesk'" "$TMP/valid.html"
+grep -Fq 'data:image/png;base64,' "$TMP/valid.html"
+grep -Fq 'data:font/woff2;base64,' "$TMP/valid.html"
+node "$GENERATOR" --check-data "$TMP/base.json" | grep -Fxq 'VALID: invoice data'
+run_check_invalid bad-total 'data.total="$123.44";' 'subtotal 123.45 plus tax 0.00 does not equal total 123.44'
+run_check_invalid mixed-currency 'data.lineItems[0].amount="EUR 123.45";' 'lineItems[0].amount uses EUR but invoice currency is USD'
+run_invalid bad-lines 'data.lineItems[0].amount="123.44";' 'lineItems sum 123.44 does not equal subtotal 123.45'
+run_invalid bad-schedule 'data.schedule.rows[1].amount="76.54";' 'schedule.rows sum 199.99 does not equal schedule.contractTotal 200.00'
+run_invalid bad-current-total 'data.schedule.rows[0].amount="100.00"; data.schedule.rows[1].amount="100.00";' 'schedule current row amount 100.00 does not equal invoice total 123.45'
+run_invalid no-current 'data.schedule.rows[0].current=false;' 'schedule must have exactly one row with current set to true (got 0)'
+run_invalid duplicate-current 'data.schedule.rows[1].current=true;' 'schedule must have exactly one row with current set to true (got 2)'
+run_invalid bad-decimals 'data.tax="0.0";' 'tax has malformed amount'
+run_invalid mixed-symbol 'data.lineItems[0].amount="€123.45";' 'lineItems[0].amount uses EUR but invoice currency is USD'
+
+echo 'PASS: invoice arithmetic validation'

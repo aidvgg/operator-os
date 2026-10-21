@@ -103,6 +103,7 @@ the input here and see the output there.
 ```json
 {
   "clientEntity": "Legal entity for the footer confidence line and the acceptance block (default: clientName). Entities differ PER ENGAGEMENT, not per client: check the invoice ledger and the engagement's own bill-to record before naming one, because the same contact can sign one piece of work personally and bill another through a company. When the contracting party is unclear, omit the field - the plain client name is always safe.",
+  "signatureLines": "Set false to keep signature block labels but omit drawn lines for a PDF that will receive e-signature fields (default: true).",
   "coverTitle": "The big Space Grotesk cover sentence, with period (default: projectTitle)",
   "coverLede": "Paragraph under the cover title (default: projectDescription)",
   "projectTag": "Right side of the running header, rendered uppercase (default: '<clientName> · <projectTitle>')",

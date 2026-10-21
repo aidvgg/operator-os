@@ -278,7 +278,7 @@ const acceptanceText = data.acceptanceText ||
   'By signing below, both parties agree to the scope of work, pricing, and terms outlined in this proposal.';
 const closingNote = data.closingNote ||
   `Questions or clarifications on any part of this proposal: contact ${sentBy} at ${contactEmail}.`;
-const sigLine = '<div class="sigline"></div>';
+const sigLine = data.signatureLines === false ? '' : '<div class="sigline"></div>';
 sections.push(`${secOpen('acceptance', true)}
 ${secHead(secNum, 'Acceptance')}
 <p class="body accept">${esc(acceptanceText)}</p>
