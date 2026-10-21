@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Synthetic fixture suite for scripts/artifact-receipt-check.
+
+Creates a disposable repository-shaped tree and receipt files, invokes the
+validator as a subprocess, and removes the tree on exit. It never reads a real
+proposal, invoice, publication, message, or approval, and it makes no network
+request. The suite proves schema and internal-chain behavior only. It does not
+authenticate provider evidence or human approval.
+"""
+
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+SCRIPT = Path(__file__).resolve().parent / "artifact-receipt-check"
+STAMP_APPROVED = "2026-08-30T10:00:00Z"
+STAMP_TRANSITION = "2026-08-30T11:00:00Z"
+assertions = 0
+failures = []
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def base_receipt(receipt_id, artifact_path, artifact_hash, transition="approved"):
+    receipt = {
+        "schema_version": "operator-os.artifact-receipt/v1",
+        "receipt_id": receipt_id,
+        "artifact": {
+            "path": artifact_path,
+            "sha256": artifact_hash,
+            "class": "proposal",
+        },
+        "transition": transition,
+        "actor": "Sam",
+        "timestamp": STAMP_APPROVED,
+        "authorization": None,
+        "approved_use": "Send synthetic fixture bytes through the fixture channel.",
+        "evidence": None,
+        "prior_approval_receipt_id": None,
+    }
+    if transition == "approved":
+        receipt["authorization"] = {
+            "quote": "send this synthetic fixture",
+            "exact": True,
+            "minimized": True,
+        }
+    return receipt
+
+
+def downstream(approval, receipt_id, transition):
+    receipt = copy.deepcopy(approval)
+    receipt["receipt_id"] = receipt_id
+    receipt["transition"] = transition
+    receipt["timestamp"] = STAMP_TRANSITION
+    receipt["authorization"] = None
+    receipt["prior_approval_receipt_id"] = approval["receipt_id"]
+    if transition == "sent":
+        receipt["evidence"] = {
+            "channel": "synthetic-fixture-channel",
+            "timestamp": STAMP_TRANSITION,
+            "provider_reference_id": "fixture-message-reference-1",
+        }
+    else:
+        receipt["evidence"] = {
+            "url": "https://evidence.example.com/synthetic-fixture",
+            "provider_revision": "synthetic-revision-1",
+        }
+    return receipt
+
+
+def write_receipts(case_dir, receipts):
+    paths = []
+    for index, receipt in enumerate(receipts):
+        path = case_dir / f"receipt-{index}.json"
+        path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+def check(name, root, receipts, expected_ok, expected_text):
+    global assertions
+    assertions += 1
+    case_dir = Path(tempfile.mkdtemp(prefix="receipt-case-"))
+    try:
+        paths = write_receipts(case_dir, receipts)
+        proc = subprocess.run(
+            [os.fspath(SCRIPT), "--root", os.fspath(root),
+             *(os.fspath(path) for path in paths)],
+            capture_output=True,
+            text=True,
+        )
+        output = proc.stdout + proc.stderr
+        ok = proc.returncode == 0
+        if ok != expected_ok or expected_text not in output:
+            failures.append(
+                f"{name}: exit={proc.returncode}, expected_ok={expected_ok}, "
+                f"missing={expected_text!r}\n{output}"
+            )
+    finally:
+        for child in case_dir.iterdir():
+            child.unlink()
+        case_dir.rmdir()
+
+
+def main():
+    if not SCRIPT.is_file() or not os.access(SCRIPT, os.X_OK):
+        print(f"FAIL validator is missing or not executable: {SCRIPT}")
+        return 1
+
+    with tempfile.TemporaryDirectory(prefix="artifact-receipt-fixtures-") as raw_root:
+        root = Path(raw_root)
+        proposal_dir = root / "outputs" / "proposals"
+        invoice_dir = root / "outputs" / "invoices"
+        proposal_dir.mkdir(parents=True)
+        invoice_dir.mkdir(parents=True)
+        artifact_bytes = b"synthetic proposal fixture\n"
+        artifact = proposal_dir / "artifact.txt"
+        artifact.write_bytes(artifact_bytes)
+        artifact_hash = digest(artifact_bytes)
+
+        approval = base_receipt(
+            "approval-1", "outputs/proposals/artifact.txt", artifact_hash)
+        sent = downstream(approval, "sent-1", "sent")
+        published = downstream(approval, "published-1", "published")
+
+        check("valid approval", root, [approval], True, "PASS")
+
+        drafted = base_receipt(
+            "drafted-1", "outputs/proposals/artifact.txt", artifact_hash, "drafted")
+        check("valid draft", root, [drafted], True, "PASS")
+        check("valid send chain", root, [approval, sent], True, "PASS")
+        check("valid publish chain", root, [approval, published], True, "PASS")
+
+        invoice_bytes = b"synthetic invoice fixture, not a real invoice\n"
+        invoice_path = invoice_dir / "synthetic-invoice.pdf"
+        invoice_path.write_bytes(invoice_bytes)
+        invoice = base_receipt(
+            "invoice-approval", "outputs/invoices/synthetic-invoice.pdf",
+            digest(invoice_bytes))
+        invoice["artifact"]["class"] = "invoice"
+        check("gitignored invoice tree allowed", root, [invoice], True, "PASS")
+
+        bad = copy.deepcopy(approval)
+        bad["authorization"]["quote"] = "TODO approval quote"
+        check("placeholder approval", root, [bad], False, "placeholder text")
+
+        bad = copy.deepcopy(approval)
+        bad["authorization"]["quote"] = "N/A"
+        check("n-a placeholder approval", root, [bad], False, "placeholder text")
+
+        bad = copy.deepcopy(approval)
+        bad["actor"] = "Synthetic Fixture Actor"
+        check("wrong approval actor", root, [bad], False, "must name Sam as actor")
+
+        bad = copy.deepcopy(approval)
+        bad["artifact"]["path"] = "outputs/../outside.txt"
+        check("path escape", root, [bad], False, "path escape")
+
+        bad = copy.deepcopy(approval)
+        bad["artifact"]["path"] = os.fspath(artifact)
+        check("absolute artifact path", root, [bad], False, "repository-relative")
+
+        outside = root / "outside.txt"
+        outside.write_bytes(artifact_bytes)
+        symlink = proposal_dir / "escape.txt"
+        symlink.symlink_to(outside)
+        bad = copy.deepcopy(approval)
+        bad["artifact"]["path"] = "outputs/proposals/escape.txt"
+        check("symlink escape", root, [bad], False, "escapes outputs/")
+
+        bad = copy.deepcopy(approval)
+        bad["artifact"]["sha256"] = "0" * 64
+        check("hash mismatch", root, [bad], False, "sha256 mismatch")
+
+        modified = proposal_dir / "modified.txt"
+        modified.write_bytes(b"before\n")
+        bad = base_receipt(
+            "modified-approval", "outputs/proposals/modified.txt", digest(b"before\n"))
+        modified.write_bytes(b"after\n")
+        check("bytes changed after receipt", root, [bad], False, "sha256 mismatch")
+
+        bad = copy.deepcopy(approval)
+        bad["transition"] = "send-ready"
+        check("transition mismatch", root, [bad], False, "transition must be one of")
+
+        bad = copy.deepcopy(approval)
+        bad["transition"] = ["approved"]
+        check("malformed transition type", root, [bad], False, "transition must be one of")
+
+        check("missing prior approval", root, [sent], False, "missing prior approval")
+
+        bad = copy.deepcopy(sent)
+        bad["evidence"] = {
+            "channel": "synthetic-fixture-channel",
+            "provider_reference_id": "fixture-message-reference-1",
+        }
+        check("send timestamp gap", root, [approval, bad], False,
+              "evidence missing field(s): timestamp")
+
+        bad = copy.deepcopy(sent)
+        del bad["evidence"]["provider_reference_id"]
+        check("send provider reference gap", root, [approval, bad], False,
+              "evidence missing field(s): provider_reference_id")
+
+        bad = copy.deepcopy(sent)
+        bad["evidence"]["provider_reference_id"] = "pending"
+        check("placeholder send provider reference", root, [approval, bad], False,
+              "evidence.provider_reference_id contains placeholder text")
+
+        bad = copy.deepcopy(sent)
+        bad["evidence"]["timestamp"] = "2026-08-30T11:01:00Z"
+        check("send timestamp disagreement", root, [approval, bad], False,
+              "must equal the receipt timestamp")
+
+        bad = copy.deepcopy(published)
+        bad["evidence"] = {
+            "url": "https://evidence.example.com/synthetic-fixture"
+        }
+        check("publication revision gap", root, [approval, bad], False,
+              "evidence missing field(s): provider_revision")
+
+        bad = copy.deepcopy(published)
+        bad["evidence"]["url"] = "not-a-url"
+        check("publication URL gap", root, [approval, bad], False,
+              "absolute HTTP or HTTPS URL")
+
+        bad = copy.deepcopy(published)
+        bad["evidence"]["url"] = "https://[bad-host/synthetic"
+        check("malformed publication URL", root, [approval, bad], False,
+              "valid absolute URL")
+
+        bad = copy.deepcopy(published)
+        bad["evidence"]["url"] = "https://example.invalid/synthetic-fixture"
+        check("reserved publication host", root, [approval, bad], False,
+              "hostname must not be reserved, synthetic, or local")
+
+        bad = copy.deepcopy(published)
+        bad["evidence"]["url"] = "https://localhost/synthetic-fixture"
+        check("local publication host", root, [approval, bad], False,
+              "hostname must not be reserved, synthetic, or local")
+
+        duplicate = copy.deepcopy(approval)
+        check("duplicate receipt id", root, [approval, duplicate], False,
+              "duplicate receipt_id")
+
+        duplicate = copy.deepcopy(approval)
+        duplicate["receipt_id"] = "approval-2"
+        check("ambiguous approvals", root, [approval, duplicate], False,
+              "ambiguous duplicate approvals")
+
+        other_bytes = b"other synthetic bytes\n"
+        other_artifact = proposal_dir / "other.txt"
+        other_artifact.write_bytes(other_bytes)
+        wrong_prior = base_receipt(
+            "approval-wrong-hash", "outputs/proposals/other.txt", digest(other_bytes))
+        bad = copy.deepcopy(sent)
+        bad["prior_approval_receipt_id"] = wrong_prior["receipt_id"]
+        check("prior artifact mismatch", root, [wrong_prior, bad], False,
+              "prior approval path does not match")
+
+        wrong_class = copy.deepcopy(approval)
+        wrong_class["receipt_id"] = "approval-wrong-class"
+        wrong_class["artifact"]["class"] = "invoice"
+        bad = copy.deepcopy(sent)
+        bad["prior_approval_receipt_id"] = wrong_class["receipt_id"]
+        check("prior class mismatch", root, [wrong_class, bad], False,
+              "prior approval class does not match")
+
+        wrong_use = copy.deepcopy(approval)
+        wrong_use["receipt_id"] = "approval-wrong-use"
+        wrong_use["approved_use"] = "A different synthetic approved use."
+        bad = copy.deepcopy(sent)
+        bad["prior_approval_receipt_id"] = wrong_use["receipt_id"]
+        check("prior approved use mismatch", root, [wrong_use, bad], False,
+              "prior approval approved_use does not match")
+
+        future = copy.deepcopy(approval)
+        future["receipt_id"] = "approval-from-future"
+        future["timestamp"] = "2026-08-30T12:00:00Z"
+        bad = copy.deepcopy(sent)
+        bad["prior_approval_receipt_id"] = future["receipt_id"]
+        check("approval after send", root, [future, bad], False,
+              "later than the transition")
+
+        bad = copy.deepcopy(approval)
+        bad["timestamp"] = "2026-08-30T10:00:00"
+        check("timezone missing", root, [bad], False, "must include Z or a UTC offset")
+
+        bad = copy.deepcopy(approval)
+        bad["artifact"]["path"] = "outputs/research/missing.txt"
+        check("missing artifact", root, [bad], False, "cannot be resolved")
+
+        bad = copy.deepcopy(approval)
+        bad["artifact"]["path"] = "knowledge/not-allowed.txt"
+        check("non-output tree", root, [bad], False, "below the outputs/ tree")
+
+        bad = copy.deepcopy(approval)
+        bad["unexpected"] = True
+        check("unknown schema field", root, [bad], False, "unknown field(s)")
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL {failure}")
+        print(f"FAIL {len(failures)} of {assertions} assertions")
+        return 1
+    print(f"PASS artifact receipt fixtures ({assertions} assertions)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

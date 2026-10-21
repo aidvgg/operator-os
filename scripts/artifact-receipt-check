@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""Validate versioned operator-os artifact receipts without changing any state.
+
+Usage:
+  scripts/artifact-receipt-check [--root REPO] RECEIPT.json [RECEIPT.json ...]
+
+The v1 JSON shape is intentionally closed. Every top-level field is required:
+
+  {
+    "schema_version": "operator-os.artifact-receipt/v1",
+    "receipt_id": "approval-2026-08-30-01",
+    "artifact": {
+      "path": "outputs/proposals/example.pdf",
+      "sha256": "<64 lowercase hex characters>",
+      "class": "proposal"
+    },
+    "transition": "approved",
+    "actor": "Sam",
+    "timestamp": "2026-08-30T12:00:00Z",
+    "authorization": {
+      "quote": "send it",
+      "exact": true,
+      "minimized": true
+    },
+    "approved_use": "Send this proposal to the named client via Signal.",
+    "evidence": null,
+    "prior_approval_receipt_id": null
+  }
+
+Transitions are drafted, approved, sent, and published. Approval receipts require
+the exact minimized authorization object above. Sent and published receipts require
+a prior approved receipt in the explicit input set for the same path, bytes, class,
+and approved use. Sent evidence is {"channel", "timestamp",
+"provider_reference_id"}; published evidence is {"url", "provider_revision"}.
+No directory discovery or network access is performed. A receipt records claims
+about authorization and external evidence. This validator proves only receipt shape,
+byte identity, and internal transition consistency. It cannot authenticate a provider
+reference, publication revision, or human approval. PASS grants no authority.
+"""
+
+import argparse
+import datetime as dt
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+
+
+SCHEMA_VERSION = "operator-os.artifact-receipt/v1"
+# SETUP.md's rebrand step changes this operator-specific value.
+OPERATOR = "Sam"
+TRANSITIONS = {"drafted", "approved", "sent", "published"}
+TOP_KEYS = {
+    "schema_version",
+    "receipt_id",
+    "artifact",
+    "transition",
+    "actor",
+    "timestamp",
+    "authorization",
+    "approved_use",
+    "evidence",
+    "prior_approval_receipt_id",
+}
+ARTIFACT_KEYS = {"path", "sha256", "class"}
+AUTH_KEYS = {"quote", "exact", "minimized"}
+SENT_EVIDENCE_KEYS = {"channel", "timestamp", "provider_reference_id"}
+PUBLISHED_EVIDENCE_KEYS = {"url", "provider_revision"}
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+CLASS_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+PLACEHOLDER_RE = re.compile(
+    r"(?:\b(?:todo|tbd|placeholder|pending|unknown|none|fill[ -]?me)\b|"
+    r"\bn\s*/?\s*a\b|"
+    r"\[(?:approval|quote|insert[^]]*)\]|<[^>]*(?:approval|quote)[^>]*>)",
+    re.IGNORECASE,
+)
+
+
+class ReceiptError(ValueError):
+    """A receipt failed a deterministic validation rule."""
+
+
+def fail(message):
+    raise ReceiptError(message)
+
+
+def exact_keys(value, expected, field):
+    if not isinstance(value, dict):
+        fail(f"{field} must be an object")
+    actual = set(value)
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    if missing:
+        fail(f"{field} missing field(s): {', '.join(missing)}")
+    if extra:
+        fail(f"{field} has unknown field(s): {', '.join(extra)}")
+
+
+def bounded_text(value, field, maximum=500):
+    if not isinstance(value, str):
+        fail(f"{field} must be a string")
+    if value != value.strip() or not value:
+        fail(f"{field} must be non-empty with no surrounding whitespace")
+    if len(value) > maximum:
+        fail(f"{field} exceeds {maximum} characters")
+    if any(ord(ch) < 32 and ch not in "\t" for ch in value):
+        fail(f"{field} contains control characters")
+    if PLACEHOLDER_RE.search(value):
+        fail(f"{field} contains placeholder text")
+    return value
+
+
+def parse_timestamp(value, field):
+    bounded_text(value, field, 64)
+    if "T" not in value:
+        fail(f"{field} must be an ISO 8601 date-time with timezone")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        fail(f"{field} must be a valid ISO 8601 date-time")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        fail(f"{field} must include Z or a UTC offset")
+    return parsed
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def resolve_artifact(root, relative):
+    bounded_text(relative, "artifact.path", 512)
+    if "\\" in relative:
+        fail("artifact.path must use repository-relative POSIX separators")
+    posix = PurePosixPath(relative)
+    if posix.is_absolute() or not posix.parts:
+        fail("artifact.path must be repository-relative")
+    if any(part in {"", ".", ".."} for part in posix.parts):
+        fail("artifact.path contains a path escape or non-canonical segment")
+    if posix.parts[0] != "outputs" or len(posix.parts) < 2:
+        fail("artifact.path must be below the outputs/ tree")
+
+    try:
+        outputs_root = (root / "outputs").resolve(strict=True)
+        root_real = root.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        fail(f"outputs/ cannot be resolved below the repository root: {exc}")
+    try:
+        outputs_root.relative_to(root_real)
+    except ValueError:
+        fail("outputs/ resolves outside the repository root")
+
+    candidate = root.joinpath(*posix.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        fail(f"artifact.path cannot be resolved: {exc}")
+    try:
+        resolved.relative_to(outputs_root)
+    except ValueError:
+        fail("artifact.path escapes outputs/ through a path or symlink")
+    try:
+        mode = resolved.stat().st_mode
+    except OSError as exc:
+        fail(f"artifact.path cannot be inspected: {exc}")
+    if not stat.S_ISREG(mode):
+        fail("artifact.path must resolve to a regular file")
+    return resolved
+
+
+def validate_url(value):
+    bounded_text(value, "evidence.url", 2048)
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        fail("evidence.url must be a valid absolute URL")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        fail("evidence.url must be an absolute HTTP or HTTPS URL")
+    if not hostname:
+        fail("evidence.url must include a hostname")
+    if parsed.username or parsed.password:
+        fail("evidence.url must not contain credentials")
+
+    hostname = hostname.rstrip(".").lower()
+    reserved_names = {"example.net", "example.org", "localhost"}
+    reserved_suffixes = (
+        ".example", ".invalid", ".test", ".localhost", ".local",
+        ".internal", ".lan", ".home",
+    )
+    if (hostname in reserved_names
+            or any(hostname.endswith("." + name) for name in reserved_names)
+            or hostname.endswith(reserved_suffixes)
+            or "." not in hostname):
+        fail("evidence.url hostname must not be reserved, synthetic, or local")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        fail("evidence.url IP hostname must be globally routable")
+
+
+def validate_receipt_shape(receipt, root):
+    exact_keys(receipt, TOP_KEYS, "receipt")
+    if receipt["schema_version"] != SCHEMA_VERSION:
+        fail(f"schema_version must be {SCHEMA_VERSION}")
+
+    receipt_id = bounded_text(receipt["receipt_id"], "receipt_id", 128)
+    if not ID_RE.fullmatch(receipt_id):
+        fail("receipt_id has invalid characters")
+
+    exact_keys(receipt["artifact"], ARTIFACT_KEYS, "artifact")
+    artifact = receipt["artifact"]
+    artifact_class = bounded_text(artifact["class"], "artifact.class", 64)
+    if not CLASS_RE.fullmatch(artifact_class):
+        fail("artifact.class must be a lowercase slug")
+    if not isinstance(artifact["sha256"], str) or not SHA256_RE.fullmatch(
+            artifact["sha256"]):
+        fail("artifact.sha256 must be exactly 64 lowercase hex characters")
+    artifact_path = resolve_artifact(root, artifact["path"])
+    try:
+        actual_hash = sha256_file(artifact_path)
+    except OSError as exc:
+        fail(f"artifact.path cannot be hashed: {exc}")
+    if actual_hash != artifact["sha256"]:
+        fail(
+            "artifact.sha256 mismatch: receipt has "
+            f"{artifact['sha256']}, bytes hash to {actual_hash}"
+        )
+
+    transition = receipt["transition"]
+    if not isinstance(transition, str) or transition not in TRANSITIONS:
+        fail("transition must be one of: approved, drafted, published, sent")
+    actor = bounded_text(receipt["actor"], "actor", 200)
+    timestamp = parse_timestamp(receipt["timestamp"], "timestamp")
+    bounded_text(receipt["approved_use"], "approved_use", 1000)
+
+    authorization = receipt["authorization"]
+    evidence = receipt["evidence"]
+    prior_id = receipt["prior_approval_receipt_id"]
+
+    if transition == "approved":
+        if actor != OPERATOR:
+            fail(f"approved receipts must name {OPERATOR} as actor")
+        exact_keys(authorization, AUTH_KEYS, "authorization")
+        quote = bounded_text(authorization["quote"], "authorization.quote", 500)
+        if "\n" in quote or "\r" in quote:
+            fail("authorization.quote must be a minimized single-line quote")
+        if authorization["exact"] is not True:
+            fail("authorization.exact must be true")
+        if authorization["minimized"] is not True:
+            fail("authorization.minimized must be true")
+        if evidence is not None:
+            fail("approved receipts must set evidence to null")
+        if prior_id is not None:
+            fail("approved receipts must set prior_approval_receipt_id to null")
+    elif transition == "sent":
+        if authorization is not None:
+            fail("sent receipts must set authorization to null and cite prior approval")
+        if not isinstance(prior_id, str) or not ID_RE.fullmatch(prior_id):
+            fail("sent receipts require a valid prior_approval_receipt_id")
+        exact_keys(evidence, SENT_EVIDENCE_KEYS, "evidence")
+        bounded_text(evidence["channel"], "evidence.channel", 100)
+        bounded_text(
+            evidence["provider_reference_id"],
+            "evidence.provider_reference_id",
+            300,
+        )
+        evidence_time = parse_timestamp(evidence["timestamp"], "evidence.timestamp")
+        if evidence_time != timestamp:
+            fail("sent evidence.timestamp must equal the receipt timestamp")
+    elif transition == "published":
+        if authorization is not None:
+            fail("published receipts must set authorization to null and cite prior approval")
+        if not isinstance(prior_id, str) or not ID_RE.fullmatch(prior_id):
+            fail("published receipts require a valid prior_approval_receipt_id")
+        exact_keys(evidence, PUBLISHED_EVIDENCE_KEYS, "evidence")
+        validate_url(evidence["url"])
+        bounded_text(evidence["provider_revision"], "evidence.provider_revision", 300)
+    else:
+        if authorization is not None:
+            fail("drafted receipts must set authorization to null")
+        if evidence is not None:
+            fail("drafted receipts must set evidence to null")
+        if prior_id is not None:
+            fail("drafted receipts must set prior_approval_receipt_id to null")
+
+    return {
+        "id": receipt_id,
+        "path": artifact["path"],
+        "sha256": artifact["sha256"],
+        "class": artifact_class,
+        "transition": transition,
+        "timestamp": timestamp,
+        "approved_use": receipt["approved_use"],
+        "prior_id": prior_id,
+    }
+
+
+def load_receipt(path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        fail("receipt file does not exist")
+    except IsADirectoryError:
+        fail("receipt path is a directory")
+    except UnicodeError as exc:
+        fail(f"receipt is not UTF-8: {exc}")
+    except json.JSONDecodeError as exc:
+        fail(f"receipt is not valid JSON: {exc.msg} at line {exc.lineno}")
+    except OSError as exc:
+        fail(f"receipt cannot be read: {exc}")
+    if not isinstance(value, dict):
+        fail("receipt JSON root must be an object")
+    return value
+
+
+def validate_set(items):
+    errors = []
+    by_id = {}
+    approvals = {}
+    exact_receipts = {}
+
+    for item in items:
+        if "record" not in item:
+            continue
+        record = item["record"]
+        if record["id"] in by_id:
+            errors.append(
+                (item, f"duplicate receipt_id also used by {by_id[record['id']]['label']}")
+            )
+        else:
+            by_id[record["id"]] = item
+
+        exact_key = (
+            record["path"],
+            record["sha256"],
+            record["class"],
+            record["transition"],
+            record["timestamp"],
+            record["approved_use"],
+        )
+        if exact_key in exact_receipts:
+            errors.append(
+                (item, "ambiguous duplicate receipt also represented by "
+                 f"{exact_receipts[exact_key]['label']}")
+            )
+        else:
+            exact_receipts[exact_key] = item
+
+        if record["transition"] == "approved":
+            approval_key = (
+                record["path"], record["sha256"], record["class"],
+                record["approved_use"],
+            )
+            approvals.setdefault(approval_key, []).append(item)
+
+    for approval_items in approvals.values():
+        if len(approval_items) > 1:
+            labels = ", ".join(item["label"] for item in approval_items)
+            for item in approval_items:
+                errors.append((item, f"ambiguous duplicate approvals for one use: {labels}"))
+
+    for item in items:
+        record = item.get("record")
+        if not record or record["transition"] not in {"sent", "published"}:
+            continue
+        prior = by_id.get(record["prior_id"])
+        if prior is None:
+            errors.append((item, "missing prior approval receipt in the explicit input set"))
+            continue
+        prior_record = prior.get("record")
+        if prior_record is None or prior_record["transition"] != "approved":
+            errors.append((item, "prior receipt is not an approved transition"))
+            continue
+        for field in ("path", "sha256", "class", "approved_use"):
+            if prior_record[field] != record[field]:
+                errors.append((item, f"prior approval {field} does not match"))
+        if prior_record["timestamp"] > record["timestamp"]:
+            errors.append((item, "prior approval timestamp is later than the transition"))
+
+    return errors
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root",
+        default=str(Path(__file__).resolve().parent.parent),
+        help="repository root, defaults to the parent of scripts/",
+    )
+    parser.add_argument("receipts", nargs="+", help="receipt JSON files")
+    args = parser.parse_args(argv)
+
+    root = Path(args.root)
+    try:
+        root = root.resolve(strict=True)
+    except OSError as exc:
+        print(f"FAIL <root> [root]: {exc}")
+        return 1
+    if not root.is_dir():
+        print("FAIL <root> [root]: root is not a directory")
+        return 1
+
+    items = []
+    for raw_path in args.receipts:
+        path = Path(raw_path)
+        label = os.fspath(path)
+        item = {"path": path, "label": label}
+        try:
+            receipt = load_receipt(path)
+            item["record"] = validate_receipt_shape(receipt, root)
+        except ReceiptError as exc:
+            item["error"] = str(exc)
+        items.append(item)
+
+    for item, message in validate_set(items):
+        if "error" not in item:
+            item["error"] = message
+        elif message not in item["error"]:
+            item["error"] += f"; {message}"
+
+    failed = False
+    for item in items:
+        if "error" in item:
+            failed = True
+            print(f"FAIL {item['label']} [receipt]: {item['error']}")
+        else:
+            print(f"PASS {item['label']}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
