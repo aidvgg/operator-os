@@ -29,5 +29,3 @@
 # Start empty. Stay empty for as long as you can. Example, deliberately commented out:
 #
 # dead-pointer knowledge/ops/os-roadmap.md::scripts/check reason=planned pass-3 work, not rot expires=2026-11-01
-
-agent-adapter-check-broken scripts/sync-agent-adapters reason=2.3.0 sync range: the generator gained host_classes.remote and the Grok /plan exception after earlier commits had regenerated their views, so those commits read stale under the current generator; retire once the range is on the remote expires=2026-10-28
