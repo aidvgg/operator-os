@@ -212,7 +212,7 @@ mechanism is specified.
 ## 9. Guardrail fixtures: tests that the checks still fire
 
 **PARTLY BUILT.** This section is the specification and owner of the fixture contract.
-`scripts/test-git-guard` is the first standing member: 414 assertions across both PreToolUse guards
+`scripts/test-git-guard` is the first standing member: 412 assertions across both PreToolUse guards
 and all three host wiring files. The repo-doctor manifest and the section 4 quality-command integration
 remain planned.
 

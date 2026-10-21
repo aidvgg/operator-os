@@ -10,7 +10,7 @@
 
 - **It produces the documents.** Branded proposals and invoices as real PDFs, numbered from a ledger, never from memory.
 - **It keeps the clock.** Deadlines live in the files, and overdue ones surface at the start of every session.
-- **It has brakes.** Guard scripts block the agent from leaking bank details, reading secrets, or wiping work, and 414 test assertions check that the guards still fire.
+- **It has brakes.** Guard scripts block the agent from leaking bank details, reading secrets, or wiping work, and 412 test assertions check that the guards still fire.
 
 ```
 git clone https://github.com/aidvgg/operator-os.git
@@ -110,7 +110,7 @@ with one job, and each complains out loud rather than passing quietly.
   files, while the second denies no-verify commits and pushes, sweep staging, hard resets, forced
   cleans and forced or deleting pushes. Both are thin adapters over the shared library
   `scripts/lib/agent_guards` (also a CLI, `scripts/agent-guard`) and fail closed when it cannot load.
-  `scripts/test-git-guard` carries 414 assertions proving both guards and all three host wiring
+  `scripts/test-git-guard` carries 412 assertions proving both guards and all three host wiring
   files.
 - `scripts/artifact-receipt-check` validates the approval and transition receipts that bind a
   client-facing send to the exact bytes the operator approved. A clean receipt proves consistency,

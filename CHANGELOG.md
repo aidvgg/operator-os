@@ -30,7 +30,7 @@ folder trust once (`grok --trust`).
 ### Changed
 
 - Guard logic moved to `scripts/lib/agent_guards`, with thin hook adapters under `.claude/hooks/`.
-  `scripts/test-git-guard` expanded from 132 to 414 assertions, including all three host wiring
+  `scripts/test-git-guard` expanded from 132 to 412 assertions, including all three host wiring
   files, malformed envelopes, near-miss false-positive controls and library-hook parity.
 - `research-doctrine` rebuilt as a self-routing assurance protocol: no Mode or Phase declaration,
   atomic coverage, assurance classes L0-L3, and a Closure Ledger the producing context cannot raise

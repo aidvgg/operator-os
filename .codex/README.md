@@ -47,7 +47,7 @@ so it is your call; this template does not ship it. Treat the hooks as the floor
 
 ## Verifying the layer
 
-`scripts/test-git-guard` runs both guard scripts against 414 assertions and checks all three host
+`scripts/test-git-guard` runs both guard scripts against 412 assertions and checks all three host
 wiring files. It proves script behavior and file-level wiring, not that a host invokes the hooks:
 Codex-side registration is this directory plus the trust prompt above, and only an interactive Codex
 session can confirm the hooks are armed.
