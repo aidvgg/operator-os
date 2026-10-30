@@ -300,9 +300,9 @@ def is_test(path: Path) -> bool:
     lowered_parts = {part.lower() for part in path.parts[:-1]}
     stem = path.stem.lower()
     return bool(
-        lowered_parts.intersection({"test", "tests", "spec", "specs", "__tests__"})
+        lowered_parts.intersection({"test", "tests", "spec", "specs", "__tests__", "e2e"})
         or stem.startswith(("test_", "test-"))
-        or stem.endswith(("_test", ".test", "_spec", ".spec"))
+        or stem.endswith(("_test", ".test", "_spec", ".spec", ".e2e"))
     )
 
 

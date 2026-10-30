@@ -6,6 +6,12 @@ is the `version` field in `package.json`; `README.md` restates it and this file 
 
 ## [Unreleased]
 
+### Fixed
+
+- The net line budget counts end-to-end browser specs as tests, which are reported, not budgeted.
+  Files under an `e2e/` directory and files named `*.e2e.ts` or `*.e2e.tsx` used to count as
+  source, so one new spec could push a coding session over its budget.
+
 ## [2.3.0] - 2026-10-21
 
 A sync of fixes and capabilities from the operating repo this template is drawn from: a third host,

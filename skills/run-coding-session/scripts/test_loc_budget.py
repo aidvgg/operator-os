@@ -90,6 +90,21 @@ class LocBudgetTests(unittest.TestCase):
         self.edit("src/old.py", lines(150, "old") + "# TO" + "DO finish later\n")
         self.assertIn("placeholder markers +1", self.hook("Stop")["reason"])
 
+    def test_test_paths_are_reported_not_budgeted(self) -> None:
+        self.hook("SessionStart", source="startup")
+        tests = (
+            "e2e/checkout.e2e.ts", "e2e/global-setup.ts", "web/e2e/fixtures/users.ts",
+            "src/cart.e2e.ts", "src/cart.e2e.tsx", "src/cart.spec.ts", "src/cart.spec.tsx",
+            "src/cart.test.ts", "src/cart.test.tsx", "src/__tests__/cart.tsx", "tests/helpers.ts",
+        )
+        for rel in tests:
+            self.edit(rel, lines(400))
+        self.assertEqual(self.hook("Stop"), {})
+        self.edit("src/cart.ts", lines(301))
+        reason = self.hook("Stop")["reason"]
+        self.assertIn("ΔLOC +301", reason)
+        self.assertIn(f"tests +{400 * len(tests)}", reason)
+
     def test_check_against_head_without_session(self) -> None:
         self.assertEqual(self.run_script("check").returncode, 1)  # the 500-line untracked file
         (self.repo / "scratch.py").unlink()
